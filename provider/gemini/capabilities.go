@@ -20,7 +20,7 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 		},
 		Tools: litellm.ToolCapabilities{
 			Calls:               litellm.SupportYes,
-			StrictSchema:        litellm.SupportNo,
+			StrictSchema:        litellm.SupportPartial,
 			Choice:              litellm.SupportYes,
 			RoundTripSignatures: litellm.SupportYes,
 		},

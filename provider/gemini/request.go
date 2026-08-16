@@ -37,12 +37,15 @@ func (p *Provider) buildRequest(req *litellm.Request) (*request, error) {
 		return nil, err
 	}
 	if len(req.Tools) > 0 {
-		converted, err := convertTools(req.Tools)
+		converted, strict, err := convertTools(req.Tools)
 		if err != nil {
 			return nil, err
 		}
 		out.Tools = converted
-		out.ToolConfig = convertToolChoice(req.ToolChoice)
+		out.ToolConfig, err = convertToolChoice(req.ToolChoice, strict)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -357,16 +360,24 @@ func convertGenerationConfig(req *litellm.Request) (*generationConfig, error) {
 	return out, nil
 }
 
-func convertTools(tools []litellm.Tool) ([]tool, error) {
+func convertTools(tools []litellm.Tool) ([]tool, bool, error) {
 	out := tool{FunctionDeclarations: make([]functionDeclaration, 0, len(tools))}
+	strict := false
+	disabled := false
 	for _, t := range tools {
-		if t.Strict == litellm.StrictEnabled {
-			return nil, fmt.Errorf("gemini: strict tool calling is not supported")
+		switch t.Strict {
+		case litellm.StrictEnabled:
+			strict = true
+		case litellm.StrictDisabled:
+			disabled = true
+		}
+		if strict && disabled {
+			return nil, false, fmt.Errorf("gemini: strict schema cannot be enabled and disabled in the same request")
 		}
 		var params map[string]any
 		if len(t.Parameters) > 0 {
 			if err := json.Unmarshal(t.Parameters, &params); err != nil {
-				return nil, fmt.Errorf("gemini: tool %q parameters must be object schema: %w", t.Name, err)
+				return nil, false, fmt.Errorf("gemini: tool %q parameters must be object schema: %w", t.Name, err)
 			}
 		}
 		out.FunctionDeclarations = append(out.FunctionDeclarations, functionDeclaration{
@@ -375,38 +386,53 @@ func convertTools(tools []litellm.Tool) ([]tool, error) {
 			Parameters:  params,
 		})
 	}
-	return []tool{out}, nil
+	return []tool{out}, strict, nil
 }
 
-func convertToolChoice(choice any) *toolConfig {
+func convertToolChoice(choice any, strict bool) (*toolConfig, error) {
+	var mode string
+	var allowed []string
 	switch v := choice.(type) {
 	case nil:
-		return nil
 	case string:
-		mode := strings.ToUpper(v)
+		mode = strings.ToUpper(strings.TrimSpace(v))
 		if mode == "REQUIRED" {
 			mode = "ANY"
 		}
-		if mode == "AUTO" || mode == "ANY" || mode == "NONE" {
-			return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: mode}}
+		if mode != "AUTO" && mode != "ANY" && mode != "NONE" && mode != "VALIDATED" {
+			return nil, fmt.Errorf("gemini: unsupported tool choice %q", v)
 		}
 	case map[string]any:
 		rawType, _ := v["type"].(string)
-		switch rawType {
+		switch strings.ToLower(strings.TrimSpace(rawType)) {
 		case "auto":
-			return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: "AUTO"}}
+			mode = "AUTO"
 		case "any", "required":
-			return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: "ANY"}}
+			mode = "ANY"
 		case "none":
-			return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: "NONE"}}
+			mode = "NONE"
+		case "validated":
+			mode = "VALIDATED"
 		case "function", "tool":
 			name, _ := v["name"].(string)
-			if name != "" {
-				return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: "ANY", AllowedFunctionNames: []string{name}}}
+			if name == "" {
+				return nil, fmt.Errorf("gemini: tool choice %q requires name", rawType)
 			}
+			mode = "ANY"
+			allowed = []string{name}
+		default:
+			return nil, fmt.Errorf("gemini: unsupported tool choice type %q", rawType)
 		}
+	default:
+		return nil, fmt.Errorf("gemini: unsupported tool choice %T", choice)
 	}
-	return nil
+	if strict && (mode == "" || mode == "AUTO") {
+		mode = "VALIDATED"
+	}
+	if mode == "" {
+		return nil, nil
+	}
+	return &toolConfig{FunctionCallingConfig: &functionCallingConfig{Mode: mode, AllowedFunctionNames: allowed}}, nil
 }
 
 func usesThinkingLevel(model string) bool {

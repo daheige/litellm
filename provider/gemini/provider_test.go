@@ -226,17 +226,75 @@ func TestBuildRequestRejectsToolResultWithoutPrecedingToolUse(t *testing.T) {
 	}
 }
 
-func TestBuildRequestRejectsStrictTool(t *testing.T) {
+func TestBuildRequestStrictToolChoice(t *testing.T) {
+	provider := mustProvider(t)
+	tool := mustTool(t, "lookup", "Lookup.", map[string]any{"type": "object"})
+	tool.Strict = litellm.StrictEnabled
+	for _, test := range []struct {
+		name   string
+		choice any
+		mode   string
+	}{
+		{name: "default", mode: "VALIDATED"},
+		{name: "auto", choice: "auto", mode: "VALIDATED"},
+		{name: "required", choice: "required", mode: "ANY"},
+		{name: "none", choice: "none", mode: "NONE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire, err := provider.buildRequest(&litellm.Request{
+				Model:      "gemini-3-pro",
+				Messages:   []litellm.Message{litellm.UserText("hi")},
+				Tools:      []litellm.Tool{tool},
+				ToolChoice: test.choice,
+			})
+			if err != nil {
+				t.Fatalf("buildRequest returned error: %v", err)
+			}
+			if got := wire.ToolConfig.FunctionCallingConfig.Mode; got != test.mode {
+				t.Fatalf("mode = %q, want %q", got, test.mode)
+			}
+		})
+	}
+}
+
+func TestBuildRequestRejectsInvalidToolChoice(t *testing.T) {
 	provider := mustProvider(t)
 	tool := mustTool(t, "lookup", "Lookup.", map[string]any{"type": "object"})
 	tool.Strict = litellm.StrictEnabled
 	_, err := provider.buildRequest(&litellm.Request{
+		Model:      "gemini-3-pro",
+		Messages:   []litellm.Message{litellm.UserText("hi")},
+		Tools:      []litellm.Tool{tool},
+		ToolChoice: "invalid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported tool choice") {
+		t.Fatalf("expected tool choice error, got %v", err)
+	}
+}
+
+func TestBuildRequestMixedStrictTools(t *testing.T) {
+	provider := mustProvider(t)
+	strict := mustTool(t, "strict", "Strict.", map[string]any{"type": "object"})
+	strict.Strict = litellm.StrictEnabled
+	other := mustTool(t, "other", "Other.", map[string]any{"type": "object"})
+
+	base := litellm.Request{
 		Model:    "gemini-3-pro",
 		Messages: []litellm.Message{litellm.UserText("hi")},
-		Tools:    []litellm.Tool{tool},
-	})
-	if err == nil || !strings.Contains(err.Error(), "strict tool calling is not supported") {
-		t.Fatalf("expected strict tool error, got %v", err)
+		Tools:    []litellm.Tool{strict, other},
+	}
+	wire, err := provider.buildRequest(&base)
+	if err != nil {
+		t.Fatalf("default strict mode returned error: %v", err)
+	}
+	if got := wire.ToolConfig.FunctionCallingConfig.Mode; got != "VALIDATED" {
+		t.Fatalf("mode = %q, want VALIDATED", got)
+	}
+
+	base.Tools[1].Strict = litellm.StrictDisabled
+	_, err = provider.buildRequest(&base)
+	if err == nil || !strings.Contains(err.Error(), "enabled and disabled") {
+		t.Fatalf("expected conflicting strict mode error, got %v", err)
 	}
 }
 
