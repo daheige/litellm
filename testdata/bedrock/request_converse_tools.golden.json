@@ -1,8 +1,10 @@
 {
   "additionalModelRequestFields": {
+    "output_config": {
+      "effort": "low"
+    },
     "thinking": {
-      "budget_tokens": 2048,
-      "type": "enabled"
+      "type": "adaptive"
     }
   },
   "inferenceConfig": {

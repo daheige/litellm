@@ -31,8 +31,9 @@ type chatRequest struct {
 
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 
-	PromptCacheKey       string `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
+	PromptCacheKey       string              `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
+	PromptCacheOptions   *PromptCacheOptions `json:"prompt_cache_options,omitempty"`
 
 	Prediction *prediction `json:"prediction,omitempty"`
 
@@ -83,9 +84,14 @@ type chatMessage struct {
 }
 
 type contentPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *imageURL `json:"image_url,omitempty"`
+	Type                  string                 `json:"type"`
+	Text                  string                 `json:"text,omitempty"`
+	ImageURL              *imageURL              `json:"image_url,omitempty"`
+	PromptCacheBreakpoint *promptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+}
+
+type promptCacheBreakpoint struct {
+	Mode string `json:"mode"`
 }
 
 type imageURL struct {
@@ -176,7 +182,8 @@ type usage struct {
 }
 
 type promptTokensDetails struct {
-	CachedTokens int `json:"cached_tokens,omitempty"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type completionTokensDetails struct {

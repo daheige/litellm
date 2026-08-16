@@ -68,6 +68,19 @@ func TestProviderOptionsAndStrictTools(t *testing.T) {
 	}
 }
 
+func TestToolChoiceCapabilities(t *testing.T) {
+	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://mimo.test", HTTPClient: roundTripFunc(nil)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := p.Capabilities("mimo-v2.5-pro").Tools.Choice; got != litellm.SupportPartial {
+		t.Fatalf("tool choice support = %v, want partial", got)
+	}
+	if err := validateToolChoice("required"); err == nil || !strings.Contains(err.Error(), `only supports "auto"`) {
+		t.Fatalf("expected tool_choice error, got %v", err)
+	}
+}
+
 func TestRejectsUnknownProviderOptions(t *testing.T) {
 	p, err := New(compat.Config{
 		APIKey:  "key",
@@ -163,6 +176,15 @@ func TestRejectsSamplingOverridesWithDefaultThinking(t *testing.T) {
 				t.Fatalf("err = %v", err)
 			}
 		})
+	}
+}
+
+func TestFutureMiMoVersionUsesCurrentThinkingContract(t *testing.T) {
+	if !thinkingDefaultEnabled("mimo-v2.6-pro") || !thinkingOverridesSampling("mimo-v3.0") {
+		t.Fatal("future MiMo versions should inherit the current thinking contract")
+	}
+	if !thinkingUnsupported("mimo-v3.0-tts-voiceclone") {
+		t.Fatal("TTS models should not advertise chat thinking controls")
 	}
 }
 

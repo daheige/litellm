@@ -78,8 +78,10 @@ func supportFromBool(ok bool) litellm.Support {
 
 func strictToolSupport(mode StrictToolMode) litellm.Support {
 	switch mode {
-	case StrictToolsForward, StrictToolsRequireAll:
+	case StrictToolsForward, StrictToolsAlways:
 		return litellm.SupportYes
+	case StrictToolsRequireAll:
+		return litellm.SupportPartial
 	default:
 		return litellm.SupportNo
 	}

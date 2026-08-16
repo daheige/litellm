@@ -23,5 +23,5 @@ event: response.code_interpreter_call.in_progress
 data: {"type":"response.code_interpreter_call.in_progress","sequence_number":8,"item_id":"ci_1"}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":9,"response":{"model":"gpt-5.1","status":"completed","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"output_tokens_details":{"reasoning_tokens":1}}}}
+data: {"type":"response.completed","sequence_number":9,"response":{"model":"gpt-5.1","status":"completed","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}}}
 

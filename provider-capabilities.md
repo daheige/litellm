@@ -13,34 +13,34 @@ if caps.Thinking.SupportsEffort("high") {
 }
 ```
 
-Capability data is advisory for UI and preflight checks. Provider adapters still validate every request and return explicit errors when a requested feature cannot be encoded.
+Capability data reports the stable baseline suitable for UI and preflight checks. Provider adapters may encode additional model-specific values; the provider API remains authoritative for those requests.
 
 ## Thinking
 
-Portable `Thinking.Effort` values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Providers that require token budgets map effort values to `budget_tokens`.
+Portable `Thinking.Effort` values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; accepted values remain model-specific.
 
 | Provider | Enable thinking | Disable thinking | Effort | BudgetTokens | IncludeOutput | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| OpenAI Chat | partial | yes | partial | no | no | Only reasoning chat models are supported; accepted efforts are `low`, `medium`, `high`, and `xhigh`; disable sends `none`. |
-| OpenAI Responses | yes | yes | yes | no | yes | `IncludeOutput` maps to `reasoning.summary=auto`. Responses also exposes native `ReasoningEffort` and `ReasoningSummary`. |
-| Anthropic | yes | partial | yes | partial | partial | Requires `MaxTokens`. Claude 4.6+ uses adaptive thinking with `output_config.effort` (`minimal` folds to `low`; `xhigh` folds to `max` on 4.6); `budget_tokens` only on pre-4.7 models; Fable/Mythos cannot disable thinking; `IncludeOutput` maps to `display: summarized` on 4.7+. |
-| Bedrock | yes | yes | yes | yes | no | Claude models only; effort maps to Anthropic `thinking.budget_tokens`. |
-| Gemini | yes | yes | yes | yes | no | Gemini 3 uses `thinkingLevel`; other thinking models use `thinkingBudget`. |
-| DeepSeek | yes | yes | partial | no | no | `low/medium/high` map to `high`; `xhigh/max` map to `max` and emit a warning when folding low/medium. |
-| GLM | yes | yes | partial | no | no | Thinking requires `glm-4.5+`; `reasoning_effort` requires `glm-5.2+`. |
-| Grok | partial | partial | partial | no | no | `reasoning_effort` is enabled for `grok-4.3` and aliases; accepted effort values are `low`, `medium`, and `high`; disable sends `none`; `stop` and penalty options are rejected for reasoning models. |
-| OpenRouter | yes | yes | yes | yes | no | `BudgetTokens` maps to `reasoning.max_tokens`; effort maps to `reasoning.effort`. |
-| Ollama | yes | yes | yes | no | no | `minimal` maps to `low`; `xhigh` maps to `max`. |
-| Qwen | yes | yes | no | yes | no | Use `BudgetTokens`; `Effort` returns an error. |
+| OpenAI Chat | partial | partial | low/medium/high/xhigh/max | no | no | Model-specific acceptance is enforced by the OpenAI API. |
+| OpenAI Responses | yes | partial | low/medium/high/xhigh/max | no | yes | Also exposes `ReasoningMode`, `ReasoningContext`, and reasoning summaries. |
+| Anthropic | yes | unknown | low/medium/high | no | yes | Uses adaptive thinking; disable, `xhigh`, and `max` are model-specific. |
+| Bedrock | yes | unknown | low/medium/high | no | no | Claude uses adaptive thinking; disable, `xhigh`, and `max` are model-specific. |
+| Gemini | yes | no | high | no | yes | Gemini 3+ uses `thinkingLevel`; other levels are model-specific. |
+| DeepSeek | yes | yes | partial | no | no | `low/medium` map to `high`; `xhigh` maps to `max`. |
+| GLM | yes | yes | partial | no | no | Model-specific acceptance is enforced by the GLM API. |
+| Grok | partial | partial | low/medium/high | no | no | Disable behavior and `xhigh` acceptance are model-specific. |
+| OpenRouter | partial | partial | partial | partial | no | Reasoning support depends on the routed model. |
+| Ollama | yes | yes | partial | no | no | OpenAI-compatible API accepts `low`, `medium`, and `high`. |
+| Qwen | partial | partial | no | partial | no | Thinking mode and budget support are model-specific. |
 | MiMo | yes | yes | no | no | no | Thinking is a provider switch; effort and budget controls are rejected. |
-| MiniMax | yes | partial | no | no | no | Thinking is adaptive; unspecified thinking is treated as enabled for `reasoning_split`; disabling is rejected for M2.x models. |
+| MiniMax | yes | partial | no | no | no | M2 always reasons; M3 supports adaptive or disabled thinking. |
 
 ## Reasoning And Usage
 
 | Provider | Reasoning response blocks | Streaming reasoning deltas | Reasoning tokens | Cache read/write usage |
 | --- | --- | --- | --- | --- |
-| OpenAI Chat | yes | yes | yes | cache read |
-| OpenAI Responses | yes | yes | yes | cache read |
+| OpenAI Chat | yes | yes | yes | read; write is model-specific |
+| OpenAI Responses | yes | yes | yes | read; write is model-specific |
 | Anthropic | yes | yes | no | read and write |
 | Bedrock | yes | yes | no | read and write |
 | Gemini | yes | yes | yes | cache read |
@@ -59,8 +59,8 @@ Portable `Thinking.Effort` values are `minimal`, `low`, `medium`, `high`, `xhigh
 
 | Provider | Block cache | Request cache policy | Prompt/cache key options |
 | --- | --- | --- | --- |
-| OpenAI Chat | no | no | `prompt_cache_key`, `prompt_cache_retention` via provider options |
-| OpenAI Responses | no | no | native `PromptCacheKey`, `PromptCacheRetention` |
+| OpenAI Chat | yes | no | block `Cache` adds an explicit breakpoint; `prompt_cache_key`, `prompt_cache_options`, and legacy `prompt_cache_retention` use provider options |
+| OpenAI Responses | yes | no | block `Cache` adds an explicit breakpoint; also supports native `PromptCacheKey`, `PromptCacheOptions`, and legacy `PromptCacheRetention` |
 | Anthropic | yes | no | no |
 | Bedrock | yes | yes | `cache_retention` provider option |
 | Gemini | no | no | no |
@@ -79,4 +79,4 @@ OpenAI Responses is provider-native. Use `provider/openai.Provider.Responses` an
 
 Provider-specific request fields are exposed through typed constants in each provider package. Unknown provider options are rejected by default; compat providers can opt into pass-through with `AllowUnknownProviderOptions`.
 
-Structured output support follows what the shared adapter can encode. For example, Bedrock exposes JSON object and JSON schema output through `outputConfig.textFormat`, while GLM injects JSON schema into the prompt and only sends `json_object`.
+Structured output support follows what the shared adapter can encode. Bedrock exposes JSON schema through `outputConfig.textFormat`; GLM injects the schema into the prompt and sends `json_object`.

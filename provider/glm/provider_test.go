@@ -19,7 +19,7 @@ func (f roundTripFunc) Do(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestThinkingVersionGates(t *testing.T) {
+func TestThinkingMapping(t *testing.T) {
 	body := captureBody(t, &litellm.Request{
 		Model:    "glm-5.2",
 		Messages: []litellm.Message{litellm.UserText("hi")},
@@ -42,28 +42,13 @@ func TestThinkingVersionGates(t *testing.T) {
 		t.Fatalf("reasoning_effort = %#v", body["reasoning_effort"])
 	}
 
-	err := chatErr(t, &litellm.Request{
-		Model:    "glm-5.1",
+	body = captureBody(t, &litellm.Request{
+		Model:    "glm-next",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "glm-5.2 or later") {
-		t.Fatalf("expected reasoning_effort version error, got %v", err)
-	}
-}
-
-func TestThinkingUnsupportedModelErrors(t *testing.T) {
-	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://glm.test", HTTPClient: roundTripFunc(nil)})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, err = p.Chat(context.Background(), &litellm.Request{
-		Model:    "glm-4",
-		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "glm-4.5 or later") {
-		t.Fatalf("expected unsupported thinking error, got %v", err)
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("future model reasoning_effort = %#v", body["reasoning_effort"])
 	}
 }
 
@@ -102,6 +87,28 @@ func TestProviderOptions(t *testing.T) {
 	thinking := body["thinking"].(map[string]any)
 	if thinking["type"] != "enabled" || thinking["clear_thinking"] != false {
 		t.Fatalf("thinking = %#v", thinking)
+	}
+}
+
+func TestToolChoiceContract(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:      "glm-5.2",
+		Messages:   []litellm.Message{litellm.UserText("hi")},
+		ToolChoice: "auto",
+	})
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("body = %#v", body)
+	}
+	if err := validateToolChoice("required"); err == nil || !strings.Contains(err.Error(), `only supports "auto"`) {
+		t.Fatalf("expected tool_choice error, got %v", err)
+	}
+
+	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://glm.test", HTTPClient: roundTripFunc(nil)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := p.Capabilities("glm-5.2").Tools.Choice; got != litellm.SupportPartial {
+		t.Fatalf("tool choice support = %v, want partial", got)
 	}
 }
 

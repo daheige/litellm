@@ -65,7 +65,6 @@ type safetySetting struct {
 
 type thinkingConfig struct {
 	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
-	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
 	IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
 }
 

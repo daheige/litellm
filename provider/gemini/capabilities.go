@@ -3,16 +3,22 @@ package gemini
 import "github.com/voocel/litellm"
 
 func (p *Provider) Capabilities(model string) litellm.Capabilities {
+	thinking := litellm.ThinkingCapabilities{
+		Supported: litellm.SupportUnknown,
+		Disable:   litellm.SupportUnknown,
+	}
+	if usesThinkingLevel(model) {
+		thinking.Supported = litellm.SupportYes
+		thinking.Disable = litellm.SupportNo
+		thinking.Efforts = []string{"high"}
+		thinking.BudgetTokens = litellm.SupportNo
+		thinking.IncludeOutput = litellm.SupportYes
+		thinking.Notes = []string{"Gemini 3 and later use thinkingLevel; minimal, low, and medium support are model-specific"}
+	}
 	return litellm.Capabilities{
 		Provider: p.Name(),
 		Model:    model,
-		Thinking: litellm.ThinkingCapabilities{
-			Supported:    litellm.SupportYes,
-			Disable:      litellm.SupportYes,
-			Efforts:      litellm.PortableThinkingEfforts(),
-			BudgetTokens: litellm.SupportYes,
-			Notes:        []string{"Gemini 3 uses thinkingLevel; other thinking models use thinkingBudget"},
-		},
+		Thinking: thinking,
 		Reasoning: litellm.ReasoningCapabilities{
 			Blocks:          litellm.SupportYes,
 			StreamingDeltas: litellm.SupportYes,

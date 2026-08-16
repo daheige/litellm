@@ -52,8 +52,9 @@ type AuthSpec struct {
 }
 
 type HeaderSpec struct {
-	Extra  map[string]string
-	Stream map[string]string
+	Extra   map[string]string
+	Stream  map[string]string
+	Request HeaderMapper
 }
 
 type RequestSpec struct {
@@ -111,12 +112,14 @@ const (
 	StrictToolsOmit StrictToolMode = iota
 	StrictToolsForward
 	StrictToolsRequireAll
+	StrictToolsAlways
 )
 
 type ThinkingMapper func(*litellm.Thinking, string) (map[string]any, error)
 type CapabilityMapper func(model string, base litellm.Capabilities) litellm.Capabilities
+type HeaderMapper func(http.Header, *litellm.Request)
 type ResponseFormatMapper func(*litellm.ResponseFormat) (any, error)
-type SchemaMapper func(litellm.Schema) (any, error)
+type SchemaMapper func(litellm.Schema, litellm.StrictMode) (any, error)
 type ProviderOptionsMapper func(litellm.ProviderOptions, map[string]any, *litellm.Request) error
 type WarningMapper func(*litellm.Request) []litellm.Warning
 type MessageMapper func([]litellm.Message) (any, error)

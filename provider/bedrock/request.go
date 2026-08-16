@@ -32,11 +32,17 @@ func (p *Provider) buildRequest(req *litellm.Request) (*request, error) {
 	}
 	out.OutputConfig = output
 	if len(req.Tools) > 0 {
-		tools, err := convertTools(req.Tools)
+		toolChoice, disableTools, err := convertToolChoice(req.ToolChoice)
 		if err != nil {
 			return nil, err
 		}
-		out.ToolConfig = &toolConfig{Tools: tools, ToolChoice: req.ToolChoice}
+		if !disableTools {
+			tools, err := convertTools(req.Tools)
+			if err != nil {
+				return nil, err
+			}
+			out.ToolConfig = &toolConfig{Tools: tools, ToolChoice: toolChoice}
+		}
 	}
 	cp, err := cachePointFromRequest(req)
 	if err != nil {
@@ -46,6 +52,65 @@ func (p *Provider) buildRequest(req *litellm.Request) (*request, error) {
 		applyCachePoints(out, cp)
 	}
 	return out, nil
+}
+
+func convertToolChoice(choice litellm.ToolChoice) (any, bool, error) {
+	if choice == nil {
+		return nil, false, nil
+	}
+	if value, ok := choice.(string); ok {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "auto":
+			return map[string]any{"auto": map[string]any{}}, false, nil
+		case "required", "any":
+			return map[string]any{"any": map[string]any{}}, false, nil
+		case "none":
+			return nil, true, nil
+		default:
+			return nil, false, fmt.Errorf("bedrock: unsupported tool_choice %q", value)
+		}
+	}
+	data, err := json.Marshal(choice)
+	if err != nil {
+		return nil, false, fmt.Errorf("bedrock: tool_choice must be an object: %w", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil || decoded == nil {
+		return nil, false, fmt.Errorf("bedrock: tool_choice must be an object")
+	}
+	if _, ok := decoded["auto"]; ok {
+		return map[string]any{"auto": map[string]any{}}, false, nil
+	}
+	if _, ok := decoded["any"]; ok {
+		return map[string]any{"any": map[string]any{}}, false, nil
+	}
+	if selected, ok := decoded["tool"].(map[string]any); ok {
+		name, _ := selected["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return nil, false, fmt.Errorf("bedrock: named tool_choice requires a tool name")
+		}
+		return map[string]any{"tool": map[string]any{"name": name}}, false, nil
+	}
+	typ, _ := decoded["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "auto":
+		return map[string]any{"auto": map[string]any{}}, false, nil
+	case "required", "any":
+		return map[string]any{"any": map[string]any{}}, false, nil
+	case "none":
+		return nil, true, nil
+	case "tool", "function":
+		name, _ := decoded["name"].(string)
+		if function, ok := decoded["function"].(map[string]any); ok && name == "" {
+			name, _ = function["name"].(string)
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, false, fmt.Errorf("bedrock: named tool_choice requires a tool name")
+		}
+		return map[string]any{"tool": map[string]any{"name": name}}, false, nil
+	default:
+		return nil, false, fmt.Errorf("bedrock: unsupported tool_choice type %q", typ)
+	}
 }
 
 func validateProviderOptions(options litellm.ProviderOptions) error {
@@ -245,7 +310,10 @@ func applyThinking(out *request, req *litellm.Request) error {
 	if !strings.Contains(strings.ToLower(req.Model), "claude") {
 		return fmt.Errorf("bedrock: thinking is only supported for Claude models")
 	}
-	thinking, err := anthropicThinking(req.Thinking, req.MaxTokens, req.Temperature)
+	if req.Thinking.IncludeOutput {
+		return fmt.Errorf("bedrock: include_output is not configurable for Claude thinking")
+	}
+	thinking, effort, err := anthropicThinking(req.Thinking)
 	if err != nil {
 		return err
 	}
@@ -253,66 +321,36 @@ func applyThinking(out *request, req *litellm.Request) error {
 		out.AdditionalModelRequestFields = map[string]any{}
 	}
 	out.AdditionalModelRequestFields["thinking"] = thinking
-	if req.Thinking.Mode == litellm.ThinkingEnabled {
-		if out.InferenceConfig == nil {
-			out.InferenceConfig = &inferenceConfig{}
-		}
-		if req.MaxTokens == nil {
-			return fmt.Errorf("bedrock: max_tokens is required when thinking is enabled")
-		}
+	if effort != "" {
+		out.AdditionalModelRequestFields["output_config"] = map[string]any{"effort": effort}
 	}
 	return nil
 }
 
-func anthropicThinking(thinking *litellm.Thinking, maxTokens *int, temperature *float64) (map[string]any, error) {
+func anthropicThinking(thinking *litellm.Thinking) (map[string]any, string, error) {
 	if thinking.Mode == litellm.ThinkingDisabled {
-		return map[string]any{"type": "disabled"}, nil
+		return map[string]any{"type": "disabled"}, "", nil
 	}
-	if maxTokens == nil {
-		return nil, fmt.Errorf("bedrock: max_tokens is required when thinking is enabled")
+	if thinking.Mode != litellm.ThinkingEnabled {
+		return nil, "", fmt.Errorf("bedrock: unsupported thinking mode %d", thinking.Mode)
 	}
-	resolvedMax := *maxTokens
-	if resolvedMax < 1024 {
-		return nil, fmt.Errorf("bedrock: thinking requires max_tokens >= 1024, got %d", resolvedMax)
+	if thinking.BudgetTokens != nil {
+		return nil, "", fmt.Errorf("bedrock: budget_tokens is not supported; use effort with adaptive thinking")
 	}
-	if temperature != nil && *temperature != 1 {
-		return nil, fmt.Errorf("bedrock: temperature must be 1 when thinking is enabled, got %g", *temperature)
+	effort, err := anthropicAdaptiveEffort(thinking.Effort)
+	if err != nil {
+		return nil, "", err
 	}
-	budget := thinking.BudgetTokens
-	if budget == nil && thinking.Effort != "" {
-		derived := effortToBudget(thinking.Effort)
-		if derived == 0 {
-			return nil, fmt.Errorf("bedrock: unknown thinking effort %q", thinking.Effort)
-		}
-		budget = &derived
-	}
-	if budget == nil {
-		return nil, fmt.Errorf("bedrock: thinking budget_tokens or effort is required")
-	}
-	if *budget < 1024 {
-		return nil, fmt.Errorf("bedrock: thinking budget_tokens must be >= 1024, got %d", *budget)
-	}
-	if *budget > resolvedMax {
-		return nil, fmt.Errorf("bedrock: thinking budget_tokens must be <= max_tokens, got %d > %d", *budget, resolvedMax)
-	}
-	return map[string]any{"type": "enabled", "budget_tokens": *budget}, nil
+	return map[string]any{"type": "adaptive"}, effort, nil
 }
 
-func effortToBudget(effort string) int {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal":
-		return 1024
-	case "low":
-		return 2048
-	case "medium":
-		return 8192
-	case "high":
-		return 16384
-	case "xhigh", "max":
-		return 32768
-	default:
-		return 0
+func anthropicAdaptiveEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	switch effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return effort, nil
 	}
+	return "", fmt.Errorf("bedrock: unsupported adaptive thinking effort %q", effort)
 }
 
 func convertTools(tools []litellm.Tool) ([]tool, error) {
@@ -351,9 +389,7 @@ func convertOutputConfig(format *litellm.ResponseFormat) (*outputConfig, error) 
 	description := ""
 	switch format.Type {
 	case litellm.ResponseFormatJSONObject:
-		name = "json_object"
-		description = "Generic JSON object response"
-		schema = map[string]any{"type": "object", "additionalProperties": true}
+		return nil, fmt.Errorf("bedrock: json_object cannot satisfy structured output schema requirements; use json_schema")
 	case litellm.ResponseFormatJSONSchema:
 		if format.JSONSchema == nil {
 			return nil, fmt.Errorf("bedrock: json schema response format requires schema")

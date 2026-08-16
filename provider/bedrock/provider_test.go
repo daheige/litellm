@@ -41,7 +41,7 @@ func TestBuildRequestToolCacheAndThinking(t *testing.T) {
 	tool.Strict = litellm.StrictEnabled
 
 	wire, err := provider.buildRequest(&litellm.Request{
-		Model:       "anthropic.claude-sonnet-4-20250514-v1:0",
+		Model:       "anthropic.claude-opus-5",
 		MaxTokens:   &maxTokens,
 		Temperature: &temp,
 		Messages: []litellm.Message{
@@ -74,7 +74,8 @@ func TestBuildRequestToolCacheAndThinking(t *testing.T) {
 		`"role":"user","content":[{"toolResult":{"toolUseId":"toolu_1","content":[{"text":"result"}]}}`,
 		`"inputSchema":{"json":{"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"}}`,
 		`"strict":true`,
-		`"thinking":{"budget_tokens":2048,"type":"enabled"}`,
+		`"output_config":{"effort":"low"}`,
+		`"thinking":{"type":"adaptive"}`,
 	} {
 		if !strings.Contains(jsonText, want) {
 			t.Fatalf("wire JSON missing %s:\n%s", want, jsonText)
@@ -85,17 +86,68 @@ func TestBuildRequestToolCacheAndThinking(t *testing.T) {
 	}
 }
 
-func TestBuildRequestRejectsThinkingWithoutBudgetOrEffort(t *testing.T) {
+func TestBuildRequestUsesDefaultAdaptiveThinking(t *testing.T) {
 	provider := mustProvider(t)
 	maxTokens := 4096
-	_, err := provider.buildRequest(&litellm.Request{
-		Model:     "anthropic.claude-sonnet-4-20250514-v1:0",
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model:     "anthropic.claude-future",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	})
-	if err == nil || !strings.Contains(err.Error(), "budget_tokens or effort is required") {
-		t.Fatalf("expected budget error, got %v", err)
+	if err != nil {
+		t.Fatalf("buildRequest returned error: %v", err)
+	}
+	thinking := wire.AdditionalModelRequestFields["thinking"].(map[string]any)
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("thinking = %#v", thinking)
+	}
+}
+
+func TestBuildRequestConvertsToolChoice(t *testing.T) {
+	provider := mustProvider(t)
+	tool := mustTool(t, "lookup", "Lookup.", map[string]any{"type": "object"})
+
+	for _, test := range []struct {
+		name   string
+		choice litellm.ToolChoice
+		want   string
+	}{
+		{name: "auto", choice: "auto", want: `{"auto":{}}`},
+		{name: "required", choice: "required", want: `{"any":{}}`},
+		{name: "named function", choice: map[string]any{"type": "function", "function": map[string]any{"name": "lookup"}}, want: `{"tool":{"name":"lookup"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire, err := provider.buildRequest(&litellm.Request{
+				Model:      "model",
+				Messages:   []litellm.Message{litellm.UserText("hi")},
+				Tools:      []litellm.Tool{tool},
+				ToolChoice: test.choice,
+			})
+			if err != nil {
+				t.Fatalf("buildRequest: %v", err)
+			}
+			data, err := json.Marshal(wire.ToolConfig.ToolChoice)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if string(data) != test.want {
+				t.Fatalf("toolChoice = %s, want %s", data, test.want)
+			}
+		})
+	}
+
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model:      "model",
+		Messages:   []litellm.Message{litellm.UserText("hi")},
+		Tools:      []litellm.Tool{tool},
+		ToolChoice: "none",
+	})
+	if err != nil {
+		t.Fatalf("buildRequest none: %v", err)
+	}
+	if wire.ToolConfig != nil {
+		t.Fatalf("toolConfig = %#v, want omitted", wire.ToolConfig)
 	}
 }
 
@@ -103,7 +155,7 @@ func TestBuildRequestMapsMaxThinkingEffort(t *testing.T) {
 	provider := mustProvider(t)
 	maxTokens := 65536
 	wire, err := provider.buildRequest(&litellm.Request{
-		Model:     "anthropic.claude-sonnet-4-20250514-v1:0",
+		Model:     "anthropic.claude-future",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "max"},
@@ -112,22 +164,48 @@ func TestBuildRequestMapsMaxThinkingEffort(t *testing.T) {
 		t.Fatalf("buildRequest returned error: %v", err)
 	}
 	thinking, ok := wire.AdditionalModelRequestFields["thinking"].(map[string]any)
-	if !ok || thinking["budget_tokens"] != 32768 {
-		t.Fatalf("thinking = %#v, want budget 32768", wire.AdditionalModelRequestFields["thinking"])
+	if !ok || thinking["type"] != "adaptive" {
+		t.Fatalf("thinking = %#v, want adaptive", wire.AdditionalModelRequestFields["thinking"])
+	}
+	output := wire.AdditionalModelRequestFields["output_config"].(map[string]any)
+	if output["effort"] != "max" {
+		t.Fatalf("output_config = %#v, want effort max", output)
 	}
 }
 
 func TestCapabilities(t *testing.T) {
 	provider := mustProvider(t)
-	caps := provider.Capabilities("anthropic.claude-sonnet-4-20250514-v1:0")
-	if caps.Thinking.Supported != litellm.SupportYes || !caps.Thinking.SupportsEffort("max") {
+	caps := provider.Capabilities("anthropic.claude-future")
+	if caps.Thinking.Supported != litellm.SupportYes || caps.Thinking.Disable != litellm.SupportUnknown || !caps.Thinking.SupportsEffort("low") || !caps.Thinking.SupportsEffort("high") || caps.Thinking.SupportsEffort("xhigh") || caps.Thinking.SupportsEffort("max") {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
-	if caps.Structured.JSONObject != litellm.SupportUnknown || caps.Structured.JSONSchema != litellm.SupportUnknown {
+	if caps.Structured.JSONObject != litellm.SupportNo || caps.Structured.JSONSchema != litellm.SupportPartial {
 		t.Fatalf("structured caps = %+v", caps.Structured)
 	}
-	if caps.Structured.Strict != litellm.SupportNo {
-		t.Fatalf("structured strict = %v, want no", caps.Structured.Strict)
+	if caps.Structured.Strict != litellm.SupportPartial {
+		t.Fatalf("structured strict = %v, want partial", caps.Structured.Strict)
+	}
+}
+
+func TestBuildRequestUsesAdaptiveThinkingForClaude47(t *testing.T) {
+	provider := mustProvider(t)
+	maxTokens := 4096
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model:     "anthropic.claude-opus-4-7-v1:0",
+		MaxTokens: &maxTokens,
+		Messages:  []litellm.Message{litellm.UserText("hi")},
+		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	thinking := wire.AdditionalModelRequestFields["thinking"].(map[string]any)
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("thinking = %#v", thinking)
+	}
+	output := wire.AdditionalModelRequestFields["output_config"].(map[string]any)
+	if output["effort"] != "high" {
+		t.Fatalf("output_config = %#v", output)
 	}
 }
 
@@ -187,15 +265,19 @@ func TestNewRejectsAmbiguousTransportConfig(t *testing.T) {
 	}
 }
 
-func TestBuildRequestRejectsThinkingWithoutMaxTokens(t *testing.T) {
+func TestBuildRequestAllowsAdaptiveThinkingWithoutMaxTokens(t *testing.T) {
 	provider := mustProvider(t)
-	_, err := provider.buildRequest(&litellm.Request{
-		Model:    "anthropic.claude-sonnet-4-20250514-v1:0",
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model:    "anthropic.claude-opus-5",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "low"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "max_tokens is required") {
-		t.Fatalf("expected max_tokens error, got %v", err)
+	if err != nil {
+		t.Fatalf("buildRequest returned error: %v", err)
+	}
+	thinking := wire.AdditionalModelRequestFields["thinking"].(map[string]any)
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("thinking = %#v", thinking)
 	}
 }
 

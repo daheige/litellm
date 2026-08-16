@@ -12,6 +12,24 @@ const defaultBaseURL = "http://localhost:11434/v1"
 
 type Config = compat.Config
 
+const (
+	ProviderOptionFrequencyPenalty = "frequency_penalty"
+	ProviderOptionPresencePenalty  = "presence_penalty"
+	ProviderOptionSeed             = "seed"
+	ProviderOptionLogitBias        = "logit_bias"
+	ProviderOptionUser             = "user"
+	ProviderOptionN                = "n"
+)
+
+var allowedProviderOptions = map[string]struct{}{
+	ProviderOptionFrequencyPenalty: {},
+	ProviderOptionPresencePenalty:  {},
+	ProviderOptionSeed:             {},
+	ProviderOptionLogitBias:        {},
+	ProviderOptionUser:             {},
+	ProviderOptionN:                {},
+}
+
 func New(cfg Config) (*compat.Provider, error) {
 	return compat.New(cfg, compat.Spec{
 		Name: "ollama",
@@ -19,7 +37,8 @@ func New(cfg Config) (*compat.Provider, error) {
 			BaseURL: defaultBaseURL,
 		},
 		Request: compat.RequestSpec{
-			Thinking: mapThinking,
+			Thinking:               mapThinking,
+			AllowedProviderOptions: allowedProviderOptions,
 		},
 		Response: compat.ResponseSpec{
 			ModelFromResponse: true,
@@ -29,10 +48,10 @@ func New(cfg Config) (*compat.Provider, error) {
 			ReasoningFields: []string{"reasoning", "reasoning_content", "thinking"},
 		},
 		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
-			caps.Thinking.Efforts = litellm.PortableThinkingEfforts()
+			caps.Thinking.Efforts = []string{"low", "medium", "high"}
 			caps.Thinking.BudgetTokens = litellm.SupportNo
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"minimal maps to low; xhigh maps to max"}
+			caps.Thinking.Notes = []string{"OpenAI-compatible reasoning_effort accepts low, medium, high, or none"}
 			caps.Reasoning.ReasoningTokens = litellm.SupportNo
 			caps.Usage.ReasoningTokens = litellm.SupportNo
 			caps.Usage.CacheReadTokens = litellm.SupportNo
@@ -63,19 +82,15 @@ func mapThinking(thinking *litellm.Thinking, _ string) (map[string]any, error) {
 		}
 		return map[string]any{"reasoning_effort": effort}, nil
 	}
-	return nil, fmt.Errorf("ollama: thinking effort is required")
+	return map[string]any{"reasoning_effort": "high"}, nil
 }
 
 func reasoningEffort(effort string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(effort))
 	switch normalized {
-	case "high", "medium", "low", "max", "none":
+	case "high", "medium", "low":
 		return normalized, nil
-	case "minimal":
-		return "low", nil
-	case "xhigh":
-		return "max", nil
 	default:
-		return "", fmt.Errorf("ollama: unsupported reasoning effort %q", effort)
+		return "", fmt.Errorf("ollama: unsupported reasoning effort %q; use low, medium, or high", effort)
 	}
 }

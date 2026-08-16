@@ -91,6 +91,20 @@ func TestM2CannotDisableThinking(t *testing.T) {
 	}
 }
 
+func TestM2UsesReasoningSplitWithoutM3ThinkingParameter(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:    "MiniMax-M2.7",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
+	})
+	if body["reasoning_split"] != true {
+		t.Fatalf("reasoning_split = %#v", body["reasoning_split"])
+	}
+	if _, ok := body["thinking"]; ok {
+		t.Fatalf("M2 request must not include M3 thinking parameter: %#v", body)
+	}
+}
+
 func TestRejectsUnsupportedThinkingControls(t *testing.T) {
 	budget := 1024
 	tests := []struct {
@@ -230,8 +244,11 @@ func TestCapabilities(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	caps := p.Capabilities("MiniMax-M3")
-	if caps.Thinking.Supported != litellm.SupportYes || caps.Thinking.Disable != litellm.SupportPartial {
+	if caps.Thinking.Supported != litellm.SupportYes || caps.Thinking.Disable != litellm.SupportYes {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
+	}
+	if caps.Tools.Choice != litellm.SupportPartial {
+		t.Fatalf("tool choice support = %v, want partial", caps.Tools.Choice)
 	}
 	if caps.Thinking.SupportsEffort("high") || caps.Thinking.BudgetTokens != litellm.SupportNo {
 		t.Fatalf("minimax should not advertise effort or budget controls: %+v", caps.Thinking)
@@ -240,6 +257,17 @@ func TestCapabilities(t *testing.T) {
 	caps = p.Capabilities("MiniMax-M2")
 	if caps.Thinking.Disable != litellm.SupportNo {
 		t.Fatalf("M2 disable support = %v, want no", caps.Thinking.Disable)
+	}
+}
+
+func TestToolChoiceContract(t *testing.T) {
+	for _, choice := range []litellm.ToolChoice{"auto", "none"} {
+		if err := validateToolChoice(choice); err != nil {
+			t.Fatalf("validateToolChoice(%q): %v", choice, err)
+		}
+	}
+	if err := validateToolChoice("required"); err == nil || !strings.Contains(err.Error(), `"auto" or "none"`) {
+		t.Fatalf("expected tool_choice error, got %v", err)
 	}
 }
 

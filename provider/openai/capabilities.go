@@ -8,7 +8,7 @@ import (
 )
 
 // promptCacheParamsSupport reports whether this endpoint is trusted to accept
-// OpenAI's prompt cache params (prompt_cache_key / prompt_cache_retention).
+// OpenAI's prompt cache params.
 // Only the official endpoint guarantees the field contract; see
 // Config.PromptCacheParams for the opt-in on compatible backends.
 func (p *Provider) promptCacheParamsSupport() litellm.Support {
@@ -29,8 +29,8 @@ func isOfficialBaseURL(baseURL string) bool {
 // structuredSupport reports the endpoint contract implemented by this
 // provider. The official OpenAI Chat/Responses APIs accept Structured Outputs;
 // a compatible custom endpoint makes no such guarantee and remains Unknown.
-// Model-specific exceptions belong to endpoint/model metadata or an explicit
-// caller override, not an ever-growing model-name list here.
+// Model-specific exceptions are enforced by the endpoint, not an ever-growing
+// model-name list here.
 func (p *Provider) structuredSupport() litellm.StructuredCapabilities {
 	if !isOfficialBaseURL(p.cfg.BaseURL) {
 		return litellm.StructuredCapabilities{
@@ -47,16 +47,11 @@ func (p *Provider) structuredSupport() litellm.StructuredCapabilities {
 }
 
 func (p *Provider) Capabilities(model string) litellm.Capabilities {
-	reasoningModel := p.isReasoningModel(model)
 	thinking := litellm.ThinkingCapabilities{
 		Supported: litellm.SupportPartial,
-		Disable:   litellm.SupportYes,
-		Efforts:   []string{"low", "medium", "high", "xhigh"},
-		Notes:     []string{"chat reasoning controls are only available on reasoning chat models"},
-	}
-	if !reasoningModel {
-		thinking.Supported = litellm.SupportNo
-		thinking.Efforts = nil
+		Disable:   litellm.SupportPartial,
+		Efforts:   openAIReasoningEfforts(),
+		Notes:     []string{"chat reasoning controls are available on reasoning chat models; model-specific limits are enforced by the OpenAI API"},
 	}
 	return litellm.Capabilities{
 		Provider: p.Name(),
@@ -82,11 +77,11 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 			ImageDetail: litellm.SupportYes,
 		},
 		Cache: litellm.CacheCapabilities{
-			Block:      litellm.SupportNo,
+			Block:      p.promptCacheParamsSupport(),
 			PromptKey:  p.promptCacheParamsSupport(),
 			Retention:  p.promptCacheParamsSupport(),
 			UsageRead:  litellm.SupportYes,
-			UsageWrite: litellm.SupportNo,
+			UsageWrite: litellm.SupportPartial,
 		},
 		Streaming: litellm.StreamingCapabilities{
 			Supported:       litellm.SupportYes,
@@ -102,7 +97,7 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 			TotalTokens:      litellm.SupportYes,
 			ReasoningTokens:  litellm.SupportYes,
 			CacheReadTokens:  litellm.SupportYes,
-			CacheWriteTokens: litellm.SupportNo,
+			CacheWriteTokens: litellm.SupportPartial,
 		},
 	}
 }

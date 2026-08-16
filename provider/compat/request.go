@@ -104,9 +104,6 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) ([]byte, []li
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(fields) == 0 {
-			return nil, nil, fmt.Errorf("%s: thinking mapper produced no fields", p.Name())
-		}
 		for key, value := range fields {
 			body[key] = value
 		}
@@ -315,12 +312,17 @@ func textOnly(blocks []litellm.Block) (string, error) {
 }
 
 func convertTools(tools []litellm.Tool, mode StrictToolMode) ([]map[string]any, []litellm.Warning, error) {
-	allStrict := true
+	var hasStrict, hasNonStrict bool
 	for _, tool := range tools {
-		if tool.Strict != litellm.StrictEnabled {
-			allStrict = false
-			break
+		switch tool.Strict {
+		case litellm.StrictEnabled:
+			hasStrict = true
+		case litellm.StrictDisabled:
+			hasNonStrict = true
 		}
+	}
+	if mode == StrictToolsRequireAll && hasStrict && hasNonStrict {
+		return nil, nil, fmt.Errorf("strict tool use requires all tools to be strict")
 	}
 	out := make([]map[string]any, 0, len(tools))
 	var warnings []litellm.Warning
@@ -349,8 +351,12 @@ func convertTools(tools []litellm.Tool, mode StrictToolMode) ([]map[string]any, 
 				fn["strict"] = false
 			}
 		case StrictToolsRequireAll:
-			if allStrict {
+			if hasStrict {
 				fn["strict"] = true
+			}
+		case StrictToolsAlways:
+			if tool.Strict == litellm.StrictDisabled {
+				return nil, nil, fmt.Errorf("tool %q cannot disable strict mode for this provider", tool.Name)
 			}
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
@@ -371,7 +377,7 @@ func (p *Provider) convertResponseFormat(format *litellm.ResponseFormat) (any, e
 		var schema any
 		if p.spec.Request.CleanSchema != nil {
 			var err error
-			schema, err = p.spec.Request.CleanSchema(format.JSONSchema.Schema)
+			schema, err = p.spec.Request.CleanSchema(format.JSONSchema.Schema, format.JSONSchema.Strict)
 			if err != nil {
 				return nil, fmt.Errorf("%s: clean response schema: %w", p.Name(), err)
 			}

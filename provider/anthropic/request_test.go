@@ -21,7 +21,7 @@ func TestBuildRequestThinkingToolsCacheRoundTrip(t *testing.T) {
 	maxTokens := 4096
 	temp := 1.0
 	req := &litellm.Request{
-		Model:       "claude-sonnet-4-5",
+		Model:       "claude-sonnet-5",
 		MaxTokens:   &maxTokens,
 		Temperature: &temp,
 		Messages: []litellm.Message{
@@ -80,7 +80,8 @@ func TestBuildRequestThinkingToolsCacheRoundTrip(t *testing.T) {
 		`"tool_use_id":"toolu_1"`,
 		`"type":"tool_reference"`,
 		`"cache_control":{"type":"ephemeral","ttl":"1h"}`,
-		`"budget_tokens":2048`,
+		`"thinking":{"type":"adaptive"}`,
+		`"output_config":{"effort":"low"}`,
 	} {
 		if !strings.Contains(jsonText, want) {
 			t.Fatalf("wire JSON missing %s:\n%s", want, jsonText)
@@ -101,6 +102,20 @@ func TestStructuredCapabilityIsModelDependent(t *testing.T) {
 	}
 	if got := provider.Capabilities("claude-custom").Structured.JSONSchema; got != litellm.SupportUnknown {
 		t.Fatalf("JSONSchema = %v, want unknown", got)
+	}
+}
+
+func TestThinkingCapabilitiesExposeStableBaseline(t *testing.T) {
+	provider, err := New(Config{APIKey: "test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	caps := provider.Capabilities("claude-future").Thinking
+	if caps.Supported != litellm.SupportYes || caps.Disable != litellm.SupportUnknown {
+		t.Fatalf("thinking support = %+v", caps)
+	}
+	if !caps.SupportsEffort("low") || !caps.SupportsEffort("high") || caps.SupportsEffort("xhigh") || caps.SupportsEffort("max") {
+		t.Fatalf("thinking efforts = %+v", caps.Efforts)
 	}
 }
 
@@ -218,20 +233,23 @@ func TestBuildRequestAllowsOneHourCacheBeforeFiveMinuteCache(t *testing.T) {
 	}
 }
 
-func TestBuildRequestRejectsSilentThinkingBudgetDefault(t *testing.T) {
+func TestBuildRequestUsesDefaultAdaptiveThinking(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 4096
-	_, _, err = provider.buildRequest(&litellm.Request{
+	wire, _, err := provider.buildRequest(&litellm.Request{
 		Model:     "claude",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), "budget_tokens or effort is required") {
-		t.Fatalf("expected budget error, got %v", err)
+	if err != nil {
+		t.Fatalf("buildRequest returned error: %v", err)
+	}
+	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" {
+		t.Fatalf("thinking = %+v, want adaptive", wire.Thinking)
 	}
 }
 
@@ -259,7 +277,7 @@ func TestBuildRequestMapsMaxThinkingEffort(t *testing.T) {
 	}
 	maxTokens := 65536
 	wire, _, err := provider.buildRequest(&litellm.Request{
-		Model:     "claude",
+		Model:     "claude-sonnet-5",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "max"},
@@ -267,12 +285,15 @@ func TestBuildRequestMapsMaxThinkingEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRequest returned error: %v", err)
 	}
-	if wire.Thinking == nil || wire.Thinking.BudgetTokens == nil || *wire.Thinking.BudgetTokens != 32768 {
-		t.Fatalf("thinking = %+v, want budget 32768", wire.Thinking)
+	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" {
+		t.Fatalf("thinking = %+v, want adaptive", wire.Thinking)
+	}
+	if wire.OutputConfig == nil || wire.OutputConfig.Effort != "max" {
+		t.Fatalf("output_config = %+v, want effort max", wire.OutputConfig)
 	}
 }
 
-func TestBuildRequestRejectsThinkingBudgetEqualToMaxTokens(t *testing.T) {
+func TestBuildRequestRejectsThinkingBudget(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -285,8 +306,8 @@ func TestBuildRequestRejectsThinkingBudgetEqualToMaxTokens(t *testing.T) {
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), "budget_tokens must be < max_tokens") {
-		t.Fatalf("expected budget/max_tokens error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "budget_tokens is not supported") {
+		t.Fatalf("expected unsupported budget error, got %v", err)
 	}
 }
 
@@ -296,57 +317,84 @@ func TestBuildRequestValidatesThinkingTopP(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 2048
-	budget := 1024
-	topP := 0.94
+	topP := 0.98
 	_, _, err = provider.buildRequest(&litellm.Request{
-		Model:     "claude",
+		Model:     "claude-sonnet-5",
 		MaxTokens: &maxTokens,
 		TopP:      &topP,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
-		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
+		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), "top_p must be between 0.95 and 1") {
+	if err == nil || !strings.Contains(err.Error(), "top_p must be between 0.99 and 1") {
 		t.Fatalf("expected top_p error, got %v", err)
 	}
 
-	topP = 0.95
+	topP = 0.99
 	if _, _, err := provider.buildRequest(&litellm.Request{
-		Model:     "claude",
+		Model:     "claude-sonnet-5",
 		MaxTokens: &maxTokens,
 		TopP:      &topP,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
-		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
+		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	}, false); err != nil {
-		t.Fatalf("buildRequest returned error for top_p 0.95: %v", err)
+		t.Fatalf("buildRequest returned error for top_p 0.99: %v", err)
 	}
 }
 
-func TestBuildRequestRejectsForcedToolChoiceWithThinking(t *testing.T) {
+func TestBuildRequestAllowsForcedToolChoiceWithAdaptiveThinking(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 2048
-	budget := 1024
-	_, _, err = provider.buildRequest(&litellm.Request{
-		Model:      "claude",
+	wire, _, err := provider.buildRequest(&litellm.Request{
+		Model:      "claude-sonnet-5",
 		MaxTokens:  &maxTokens,
 		Messages:   []litellm.Message{litellm.UserText("hi")},
-		Thinking:   &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
+		Thinking:   &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 		ToolChoice: map[string]any{"type": "tool", "name": "lookup"},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), `tool_choice "tool" is not supported`) {
-		t.Fatalf("expected tool_choice error, got %v", err)
+	if err != nil {
+		t.Fatalf("buildRequest returned error: %v", err)
+	}
+	choice, ok := wire.ToolChoice.(map[string]any)
+	if !ok || choice["type"] != "tool" || choice["name"] != "lookup" {
+		t.Fatalf("tool_choice = %#v", wire.ToolChoice)
+	}
+}
+
+func TestConvertToolChoice(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		choice litellm.ToolChoice
+		want   string
+	}{
+		{name: "auto", choice: "auto", want: `{"type":"auto"}`},
+		{name: "required", choice: "required", want: `{"type":"any"}`},
+		{name: "none", choice: "none", want: `{"type":"none"}`},
+		{name: "named function", choice: map[string]any{"type": "function", "function": map[string]any{"name": "lookup"}}, want: `{"name":"lookup","type":"tool"}`},
+		{name: "named tool without parallel use", choice: map[string]any{"type": "tool", "name": "lookup", "disable_parallel_tool_use": true}, want: `{"disable_parallel_tool_use":true,"name":"lookup","type":"tool"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := convertToolChoice(test.choice)
+			if err != nil {
+				t.Fatalf("convertToolChoice: %v", err)
+			}
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if string(data) != test.want {
+				t.Fatalf("tool_choice = %s, want %s", data, test.want)
+			}
+		})
 	}
 
-	if _, _, err := provider.buildRequest(&litellm.Request{
-		Model:      "claude",
-		MaxTokens:  &maxTokens,
-		Messages:   []litellm.Message{litellm.UserText("hi")},
-		Thinking:   &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
-		ToolChoice: map[string]any{"type": "none"},
-	}, false); err != nil {
-		t.Fatalf("buildRequest returned error for tool_choice none: %v", err)
+	if _, err := convertToolChoice("invalid"); err == nil || !strings.Contains(err.Error(), "unsupported tool_choice") {
+		t.Fatalf("expected invalid tool_choice error, got %v", err)
+	}
+	if _, err := convertToolChoice(map[string]any{"type": "auto", "disable_parallel_tool_use": "yes"}); err == nil || !strings.Contains(err.Error(), "must be boolean") {
+		t.Fatalf("expected invalid disable_parallel_tool_use error, got %v", err)
 	}
 }
 
@@ -385,7 +433,7 @@ func TestBuildRequestRejectsTemperatureAndTopP(t *testing.T) {
 	}
 	maxTokens := 1024
 	temp := 0.7
-	topP := 0.9
+	topP := 0.99
 	_, _, err = provider.buildRequest(&litellm.Request{
 		Model:       "claude",
 		MaxTokens:   &maxTokens,
@@ -404,7 +452,7 @@ func TestBuildRequestKeepsTopPWhenTemperatureUnset(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 1024
-	topP := 0.9
+	topP := 0.99
 	wire, _, err := provider.buildRequest(&litellm.Request{
 		Model:     "claude",
 		MaxTokens: &maxTokens,
@@ -732,7 +780,7 @@ func TestBuildRequestAdaptiveThinkingOnModernModels(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %+v, want none", warnings)
 	}
-	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" || wire.Thinking.BudgetTokens != nil {
+	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" {
 		t.Fatalf("thinking = %+v, want adaptive without budget", wire.Thinking)
 	}
 	if wire.OutputConfig == nil || wire.OutputConfig.Effort != "xhigh" {
@@ -740,85 +788,67 @@ func TestBuildRequestAdaptiveThinkingOnModernModels(t *testing.T) {
 	}
 }
 
-func TestBuildRequestFoldsMinimalEffortWithWarning(t *testing.T) {
+func TestBuildRequestRejectsMinimalAdaptiveEffort(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 4096
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
+	_, _, err = provider.buildRequest(&litellm.Request{
 		Model:     "claude-sonnet-5",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "minimal"},
 	}, false)
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
-	}
-	if wire.OutputConfig == nil || wire.OutputConfig.Effort != "low" {
-		t.Fatalf("output_config = %+v, want effort low", wire.OutputConfig)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.thinking_effort_folded" {
-		t.Fatalf("warnings = %+v", warnings)
+	if err == nil || !strings.Contains(err.Error(), "minimal") {
+		t.Fatalf("expected unsupported effort error, got %v", err)
 	}
 }
 
-func TestBuildRequestDropsBudgetOnAdaptiveModels(t *testing.T) {
+func TestBuildRequestRejectsBudgetOnAdaptiveModels(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 4096
 	budget := 2048
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
+	_, _, err = provider.buildRequest(&litellm.Request{
 		Model:     "claude-opus-4-7",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
 	}, false)
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
-	}
-	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" || wire.Thinking.BudgetTokens != nil {
-		t.Fatalf("thinking = %+v, want adaptive without budget", wire.Thinking)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.thinking_budget_dropped" {
-		t.Fatalf("warnings = %+v", warnings)
+	if err == nil || !strings.Contains(err.Error(), "budget_tokens") {
+		t.Fatalf("expected unsupported budget error, got %v", err)
 	}
 }
 
-func TestBuildRequestKeepsBudgetOnClaude46(t *testing.T) {
+func TestBuildRequestRejectsBudgetOnClaude46(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 4096
 	budget := 2048
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
+	_, _, err = provider.buildRequest(&litellm.Request{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
 	}, false)
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
-	}
-	if wire.Thinking == nil || wire.Thinking.Type != "enabled" || wire.Thinking.BudgetTokens == nil || *wire.Thinking.BudgetTokens != 2048 {
-		t.Fatalf("thinking = %+v, want enabled with budget 2048", wire.Thinking)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.thinking_budget_deprecated" {
-		t.Fatalf("warnings = %+v", warnings)
+	if err == nil || !strings.Contains(err.Error(), "budget_tokens is not supported") {
+		t.Fatalf("expected unsupported budget error, got %v", err)
 	}
 }
 
-func TestBuildRequestClaude46FoldsXHighToMax(t *testing.T) {
+func TestBuildRequestPassesModelSpecificEffortThrough(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 4096
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
-		Model:     "claude-opus-4-6",
+	wire, _, err := provider.buildRequest(&litellm.Request{
+		Model:     "claude-future",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
 		Thinking:  &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
@@ -826,48 +856,36 @@ func TestBuildRequestClaude46FoldsXHighToMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRequest returned error: %v", err)
 	}
-	if wire.Thinking == nil || wire.Thinking.Type != "adaptive" {
-		t.Fatalf("thinking = %+v, want adaptive", wire.Thinking)
-	}
-	if wire.OutputConfig == nil || wire.OutputConfig.Effort != "max" {
-		t.Fatalf("output_config = %+v, want effort max", wire.OutputConfig)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.thinking_effort_folded" {
-		t.Fatalf("warnings = %+v", warnings)
+	if wire.OutputConfig == nil || wire.OutputConfig.Effort != "xhigh" {
+		t.Fatalf("output_config = %+v, want effort xhigh", wire.OutputConfig)
 	}
 }
 
-func TestBuildRequestDropsSamplingOnModernModels(t *testing.T) {
+func TestBuildRequestRejectsSamplingOnModernModels(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 1024
 	temp := 0.7
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
+	_, _, err = provider.buildRequest(&litellm.Request{
 		Model:       "claude-sonnet-5",
 		MaxTokens:   &maxTokens,
 		Temperature: &temp,
 		Messages:    []litellm.Message{litellm.UserText("hi")},
 	}, false)
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
-	}
-	if wire.Temperature != nil {
-		t.Fatalf("temperature = %v, want dropped", *wire.Temperature)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.sampling_params_dropped" {
-		t.Fatalf("warnings = %+v", warnings)
+	if err == nil || !strings.Contains(err.Error(), "temperature must be 1") {
+		t.Fatalf("expected unsupported sampling error, got %v", err)
 	}
 }
 
-func TestBuildRequestOmitsDisabledThinkingOnFable(t *testing.T) {
+func TestBuildRequestPassesModelSpecificDisableThrough(t *testing.T) {
 	provider, err := New(Config{APIKey: "test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 	maxTokens := 1024
-	wire, warnings, err := provider.buildRequest(&litellm.Request{
+	wire, _, err := provider.buildRequest(&litellm.Request{
 		Model:     "claude-fable-5",
 		MaxTokens: &maxTokens,
 		Messages:  []litellm.Message{litellm.UserText("hi")},
@@ -876,11 +894,8 @@ func TestBuildRequestOmitsDisabledThinkingOnFable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRequest returned error: %v", err)
 	}
-	if wire.Thinking != nil {
-		t.Fatalf("thinking = %+v, want omitted", wire.Thinking)
-	}
-	if len(warnings) != 1 || warnings[0].Code != "anthropic.thinking_always_on" {
-		t.Fatalf("warnings = %+v", warnings)
+	if wire.Thinking == nil || wire.Thinking.Type != "disabled" {
+		t.Fatalf("thinking = %+v, want disabled passthrough", wire.Thinking)
 	}
 }
 

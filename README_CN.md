@@ -34,7 +34,7 @@ func main() {
 	}
 
 	resp, err := client.Chat(context.Background(), litellm.Request{
-		Model: "gpt-5.4-mini",
+		Model: "gpt-5.6",
 		Messages: []litellm.Message{
 			litellm.System("You are concise."),
 			litellm.UserText("用一句话解释 Go interface。"),
@@ -68,7 +68,7 @@ msgs := []litellm.Message{
 	litellm.User(litellm.Text("图里有什么？"), litellm.ImageURL("https://example.com/cat.png")),
 }
 
-resp, err := client.Chat(ctx, litellm.Request{Model: "gpt-5.4-mini", Messages: msgs})
+resp, err := client.Chat(ctx, litellm.Request{Model: "gpt-5.6", Messages: msgs})
 _ = resp
 _ = err
 ```
@@ -117,7 +117,7 @@ client, err := openai.NewClient(openai.Config{APIKey: os.Getenv("OPENAI_API_KEY"
 
 ```go
 stream, err := client.Stream(ctx, litellm.Request{
-	Model:    "gpt-5.4-mini",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("讲个短笑话。")},
 })
 if err != nil {
@@ -192,7 +192,7 @@ if err != nil {
 tool.Strict = litellm.StrictEnabled
 
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:      "gpt-5.4-mini",
+	Model:      "gpt-5.6",
 	Messages:   []litellm.Message{litellm.UserText("巴黎天气？")},
 	Tools:      []litellm.Tool{tool},
 	ToolChoice: "auto",
@@ -214,7 +214,7 @@ if err != nil {
 }
 
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:          "gpt-5.4-mini",
+	Model:          "gpt-5.6",
 	Messages:       []litellm.Message{litellm.UserText("生成一个人。")},
 	ResponseFormat: format,
 })
@@ -226,7 +226,7 @@ Thinking 必须显式设置。`Thinking == nil` 时 SDK 不发送任何 thinking
 
 ```go
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:    "claude-sonnet-4-5-20250929",
+	Model:    "claude-sonnet-5",
 	Messages: []litellm.Message{litellm.UserText("解释一下取舍。")},
 	MaxTokens: litellm.IntPtr(2048),
 	Thinking: &litellm.Thinking{
@@ -236,9 +236,9 @@ resp, err := client.Chat(ctx, litellm.Request{
 })
 ```
 
-Provider 约束会在本地校验。例如 4.6 之前的 Claude 模型上，Anthropic thinking 要求 `max_tokens >= 1024`，必须有 budget 或 effort，且不能和用户显式 temperature 冲突；Claude 4.6 及以后使用 adaptive thinking，effort 映射为 `output_config.effort`。
-可跨 Provider 使用的 effort 值为 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`；需要 token budget 的 Provider 会把这些值映射为 `budget_tokens`。
-多 Provider UI 或预检可以用 `client.Capabilities(model)` 或 `litellm.GetCapabilities(provider, model)` 查询能力。
+稳定的 Provider 约束会在本地校验；模型特有的 effort 和 disable 限制交给官方 API，因此同一 API 代际的新模型无需更新 SDK。
+通用 effort 值为 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`，实际支持范围取决于模型。
+多 Provider UI 或预检可以用 `client.Capabilities(model)` 或 `litellm.GetCapabilities(provider, model)` 查询稳定能力基线；基线之外的模型特有值仍可发送，并由官方 API 校验。
 
 ## OpenAI Responses
 
@@ -251,12 +251,14 @@ if err != nil {
 }
 
 resp, err := oai.Responses(ctx, &openai.ResponsesRequest{
-	Model: "gpt-5.5",
+	Model: "gpt-5.6",
 	Messages: []litellm.Message{
 		litellm.UserText("逐步计算 15*8。"),
 	},
 	ReasoningEffort:  "medium",
 	ReasoningSummary: "auto",
+	ReasoningMode:    "pro",
+	ReasoningContext: "all_turns",
 	MaxOutputTokens:  litellm.IntPtr(800),
 	OpenAITools: []openai.ResponsesTool{
 		{"type": "web_search_preview"},
@@ -273,7 +275,7 @@ oai, err := openai.New(openai.Config{
 })
 
 stream, err := oai.ResponsesStream(ctx, &openai.ResponsesRequest{
-	Model:    "gpt-5.5",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("搜索并总结。")},
 })
 ```
@@ -332,10 +334,10 @@ Provider 特定请求选项放在 `Request.ProviderOptions`。未知 key 默认�
 
 ```go
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:    "gpt-5.4-mini",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("Hello")},
 	ProviderOptions: litellm.ProviderOptions{
-		openai.ProviderOptionPromptCacheRetention: "24h",
+		openai.ProviderOptionPromptCacheOptions: openai.PromptCacheOptions{Mode: "implicit", TTL: "30m"},
 	},
 })
 ```

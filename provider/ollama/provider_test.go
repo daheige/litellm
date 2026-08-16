@@ -52,8 +52,17 @@ func TestNoAPIKeyRequiredAndThinkingMapping(t *testing.T) {
 	testgolden.AssertJSON(t, "../../testdata/compat/ollama_request.golden.json", body)
 }
 
-func TestThinkingRequiresEffort(t *testing.T) {
-	p, err := New(compat.Config{BaseURL: "https://ollama.test", HTTPClient: roundTripFunc(nil)})
+func TestThinkingUsesDefaultEffort(t *testing.T) {
+	var body map[string]any
+	p, err := New(compat.Config{
+		BaseURL: "https://ollama.test",
+		HTTPClient: roundTripFunc(func(httpReq *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(httpReq.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
+		}),
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -62,21 +71,15 @@ func TestThinkingRequiresEffort(t *testing.T) {
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	})
-	if err == nil || !strings.Contains(err.Error(), "effort is required") {
-		t.Fatalf("expected thinking requirement error, got %v", err)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %#v, want high", body["reasoning_effort"])
 	}
 }
 
-func TestThinkingEffortMaxAndValidation(t *testing.T) {
-	body := captureBody(t, &litellm.Request{
-		Model:    "gpt-oss:20b",
-		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
-	})
-	if body["reasoning_effort"] != "max" {
-		t.Fatalf("body = %#v", body)
-	}
-
+func TestThinkingEffortValidation(t *testing.T) {
 	p, err := New(compat.Config{BaseURL: "https://ollama.test", HTTPClient: roundTripFunc(nil)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -84,10 +87,21 @@ func TestThinkingEffortMaxAndValidation(t *testing.T) {
 	_, err = p.Chat(context.Background(), &litellm.Request{
 		Model:    "qwen3",
 		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "extreme"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported reasoning effort") {
 		t.Fatalf("expected effort error, got %v", err)
+	}
+}
+
+func TestCapabilitiesUseDocumentedEfforts(t *testing.T) {
+	p, err := New(compat.Config{BaseURL: "https://ollama.test", HTTPClient: roundTripFunc(nil)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	caps := p.Capabilities("qwen3")
+	if !caps.Thinking.SupportsEffort("low") || !caps.Thinking.SupportsEffort("medium") || !caps.Thinking.SupportsEffort("high") || caps.Thinking.SupportsEffort("xhigh") || caps.Thinking.SupportsEffort("max") {
+		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
 }
 

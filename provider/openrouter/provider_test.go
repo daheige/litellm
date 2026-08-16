@@ -325,6 +325,58 @@ func TestJSONSchemaCleaned(t *testing.T) {
 	}
 }
 
+func TestNonStrictJSONSchemaPreservesAdditionalProperties(t *testing.T) {
+	format, err := litellm.NewResponseFormatJSONSchema("answer", "", map[string]any{
+		"type":                 "object",
+		"additionalProperties": true,
+		"properties":           map[string]any{"ok": map[string]any{"type": "boolean"}},
+	}, litellm.StrictDisabled)
+	if err != nil {
+		t.Fatalf("NewResponseFormatJSONSchema: %v", err)
+	}
+	body := captureBody(t, nil, nil, &litellm.Request{
+		Model:          "openai/gpt-4o-mini",
+		Messages:       []litellm.Message{litellm.UserText("hi")},
+		ResponseFormat: format,
+	})
+	schema := body["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)
+	if schema["additionalProperties"] != true {
+		t.Fatalf("non-strict schema was changed: %#v", schema)
+	}
+}
+
+func TestStrictToolsAreForwarded(t *testing.T) {
+	tool, err := litellm.NewTool("lookup", "Lookup.", map[string]any{"type": "object"})
+	if err != nil {
+		t.Fatalf("NewTool: %v", err)
+	}
+	tool.Strict = litellm.StrictEnabled
+	req := &litellm.Request{
+		Model:    "anthropic/claude-sonnet-4.5",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Tools:    []litellm.Tool{tool},
+	}
+	body := captureBody(t, nil, nil, req)
+	fn := body["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if fn["strict"] != true {
+		t.Fatalf("strict = %#v, want true", fn["strict"])
+	}
+	headers := make(http.Header)
+	headers.Set("x-anthropic-beta", "interleaved-thinking-2025-05-14")
+	mapHeaders(headers, req)
+	if got := headers.Get("x-anthropic-beta"); got != "interleaved-thinking-2025-05-14,"+structuredOutputsBeta {
+		t.Fatalf("x-anthropic-beta = %q", got)
+	}
+
+	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://openrouter.test", HTTPClient: roundTripFunc(nil)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := p.Capabilities("openai/gpt-4o-mini").Tools.StrictSchema; got != litellm.SupportPartial {
+		t.Fatalf("strict tool support = %v, want partial", got)
+	}
+}
+
 func captureBody(t *testing.T, referer, title *string, req *litellm.Request) map[string]any {
 	t.Helper()
 	var body map[string]any

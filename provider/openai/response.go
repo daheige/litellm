@@ -63,6 +63,7 @@ func convertUsage(u *usage, model string) litellm.Usage {
 	}
 	if u.PromptTokensDetails != nil {
 		out.CacheReadTokens = u.PromptTokensDetails.CachedTokens
+		out.CacheWriteTokens = u.PromptTokensDetails.CacheWriteTokens
 	}
 	if u.CompletionTokensDetails != nil {
 		out.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens

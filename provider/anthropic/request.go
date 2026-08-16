@@ -66,9 +66,8 @@ type anthropicTool struct {
 }
 
 type anthropicThinking struct {
-	Type         string `json:"type"`
-	BudgetTokens *int   `json:"budget_tokens,omitempty"`
-	Display      string `json:"display,omitempty"`
+	Type    string `json:"type"`
+	Display string `json:"display,omitempty"`
 }
 
 type anthropicOutputConfig struct {
@@ -79,43 +78,6 @@ type anthropicOutputConfig struct {
 type anthropicOutputFormat struct {
 	Type   string          `json:"type"`
 	Schema json.RawMessage `json:"schema,omitempty"`
-}
-
-// modelFamily selects the thinking and sampling wire shape per model
-// generation; the Messages API rejects the legacy shapes on newer models.
-type modelFamily int
-
-const (
-	// familyLegacy (Claude 4.5 and older): thinking uses budget_tokens and
-	// sampling parameters are accepted.
-	familyLegacy modelFamily = iota
-	// familyClaude46 (Opus 4.6, Sonnet 4.6): adaptive thinking preferred,
-	// budget_tokens deprecated but functional, sampling accepted.
-	familyClaude46
-	// familyAdaptive (Opus 4.7/4.8, Sonnet 5): adaptive thinking only;
-	// budget_tokens, temperature, and top_p are rejected with 400.
-	familyAdaptive
-	// familyAlwaysThinking (Fable 5, Mythos 5): thinking is always on; both
-	// budget_tokens and an explicit disabled config are rejected with 400.
-	familyAlwaysThinking
-)
-
-func classifyModel(model string) modelFamily {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "fable"), strings.Contains(m, "mythos"):
-		return familyAlwaysThinking
-	case strings.Contains(m, "opus-4-7"), strings.Contains(m, "opus-4-8"), strings.Contains(m, "sonnet-5"):
-		return familyAdaptive
-	case strings.Contains(m, "opus-4-6"), strings.Contains(m, "sonnet-4-6"):
-		return familyClaude46
-	default:
-		return familyLegacy
-	}
-}
-
-func (f modelFamily) rejectsSampling() bool {
-	return f == familyAdaptive || f == familyAlwaysThinking
 }
 
 func warning(code, message string) litellm.Warning {
@@ -134,17 +96,17 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*anthropicRe
 	if req.Temperature != nil && req.TopP != nil {
 		return nil, nil, fmt.Errorf("anthropic: temperature and top_p cannot both be set")
 	}
-	family := classifyModel(req.Model)
 	metadata, err := anthropicMetadata(req.ProviderOptions)
 	if err != nil {
 		return nil, nil, err
 	}
-	var warnings []litellm.Warning
 	temperature, topP := req.Temperature, req.TopP
-	if family.rejectsSampling() && (temperature != nil || topP != nil) {
-		warnings = append(warnings, warning("anthropic.sampling_params_dropped",
-			fmt.Sprintf("%s does not accept temperature or top_p; the parameters were dropped", req.Model)))
-		temperature, topP = nil, nil
+	if err := validateSampling(temperature, topP); err != nil {
+		return nil, nil, err
+	}
+	toolChoice, err := convertToolChoice(req.ToolChoice)
+	if err != nil {
+		return nil, nil, err
 	}
 	out := &anthropicRequest{
 		Model:         req.Model,
@@ -153,14 +115,13 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*anthropicRe
 		Temperature:   temperature,
 		TopP:          topP,
 		StopSequences: append([]string(nil), req.Stop...),
-		ToolChoice:    req.ToolChoice,
+		ToolChoice:    toolChoice,
 		Metadata:      metadata,
 	}
-	thinking, effort, thinkingWarnings, err := convertThinking(req.Thinking, family, *req.MaxTokens, temperature, topP, req.ToolChoice)
+	thinking, effort, err := convertThinking(req.Thinking)
 	if err != nil {
 		return nil, nil, err
 	}
-	warnings = append(warnings, thinkingWarnings...)
 	out.Thinking = thinking
 	format, err := convertResponseFormat(req.ResponseFormat)
 	if err != nil {
@@ -185,7 +146,77 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*anthropicRe
 	}
 	out.System = system
 	out.Messages = messages
-	return out, warnings, nil
+	return out, nil, nil
+}
+
+func convertToolChoice(choice litellm.ToolChoice) (any, error) {
+	if choice == nil {
+		return nil, nil
+	}
+	if value, ok := choice.(string); ok {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "auto", "none":
+			return map[string]any{"type": strings.ToLower(strings.TrimSpace(value))}, nil
+		case "required", "any":
+			return map[string]any{"type": "any"}, nil
+		default:
+			return nil, fmt.Errorf("anthropic: unsupported tool_choice %q", value)
+		}
+	}
+	data, err := json.Marshal(choice)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: tool_choice must be an object: %w", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil || decoded == nil {
+		return nil, fmt.Errorf("anthropic: tool_choice must be an object")
+	}
+	typ, _ := decoded["type"].(string)
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	switch typ {
+	case "auto", "any":
+		out := map[string]any{"type": typ}
+		if err := copyDisableParallelToolUse(decoded, out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case "none":
+		return map[string]any{"type": typ}, nil
+	case "required":
+		out := map[string]any{"type": "any"}
+		if err := copyDisableParallelToolUse(decoded, out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case "tool", "function":
+		name, _ := decoded["name"].(string)
+		if function, ok := decoded["function"].(map[string]any); ok && name == "" {
+			name, _ = function["name"].(string)
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("anthropic: named tool_choice requires a tool name")
+		}
+		out := map[string]any{"type": "tool", "name": name}
+		if err := copyDisableParallelToolUse(decoded, out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("anthropic: unsupported tool_choice type %q", typ)
+	}
+}
+
+func copyDisableParallelToolUse(from, to map[string]any) error {
+	value, ok := from["disable_parallel_tool_use"]
+	if !ok {
+		return nil
+	}
+	disable, ok := value.(bool)
+	if !ok {
+		return fmt.Errorf("anthropic: disable_parallel_tool_use must be boolean")
+	}
+	to["disable_parallel_tool_use"] = disable
+	return nil
 }
 
 func convertResponseFormat(format *litellm.ResponseFormat) (*anthropicOutputFormat, error) {
@@ -259,171 +290,51 @@ func anthropicMetadata(options litellm.ProviderOptions) (map[string]any, error) 
 	return metadata, nil
 }
 
-func convertThinking(thinking *litellm.Thinking, family modelFamily, maxTokens int, temperature, topP *float64, toolChoice any) (*anthropicThinking, string, []litellm.Warning, error) {
+func validateSampling(temperature, topP *float64) error {
+	if temperature != nil && *temperature != 1 {
+		return fmt.Errorf("anthropic: temperature must be 1 on current Claude models, got %g", *temperature)
+	}
+	if topP != nil && (*topP < 0.99 || *topP > 1) {
+		return fmt.Errorf("anthropic: top_p must be between 0.99 and 1 on current Claude models, got %g", *topP)
+	}
+	return nil
+}
+
+func convertThinking(thinking *litellm.Thinking) (*anthropicThinking, string, error) {
 	if err := thinking.Validate(); err != nil {
-		return nil, "", nil, fmt.Errorf("anthropic: %w", err)
+		return nil, "", fmt.Errorf("anthropic: %w", err)
 	}
 	if thinking == nil || thinking.Mode == litellm.ThinkingUnspecified {
-		return nil, "", nil, nil
+		return nil, "", nil
 	}
 	if thinking.Mode == litellm.ThinkingDisabled {
-		if family == familyAlwaysThinking {
-			return nil, "", []litellm.Warning{warning("anthropic.thinking_always_on",
-				"thinking cannot be disabled on this model; the thinking field was omitted")}, nil
-		}
-		return &anthropicThinking{Type: "disabled"}, "", nil, nil
+		return &anthropicThinking{Type: "disabled"}, "", nil
 	}
-	if typ, ok := forcedThinkingToolChoice(toolChoice); ok {
-		return nil, "", nil, fmt.Errorf("anthropic: tool_choice %q is not supported when thinking is enabled", typ)
-	}
-	switch family {
-	case familyAdaptive, familyAlwaysThinking:
-		return adaptiveThinking(thinking, family)
-	case familyClaude46:
-		if thinking.BudgetTokens != nil {
-			out, err := budgetThinking(thinking, maxTokens, temperature, topP)
-			if err != nil {
-				return nil, "", nil, err
-			}
-			return out, "", []litellm.Warning{warning("anthropic.thinking_budget_deprecated",
-				"budget_tokens is deprecated on Claude 4.6 models; prefer effort with adaptive thinking")}, nil
-		}
-		return adaptiveThinking(thinking, family)
-	default:
-		out, err := budgetThinking(thinking, maxTokens, temperature, topP)
-		return out, "", nil, err
-	}
-}
-
-func adaptiveThinking(thinking *litellm.Thinking, family modelFamily) (*anthropicThinking, string, []litellm.Warning, error) {
-	var warnings []litellm.Warning
 	if thinking.BudgetTokens != nil {
-		warnings = append(warnings, warning("anthropic.thinking_budget_dropped",
-			"budget_tokens is not supported on this model; using adaptive thinking, tune depth with effort"))
+		return nil, "", fmt.Errorf("anthropic: budget_tokens is not supported; use effort with adaptive thinking")
 	}
-	effort, effortWarnings, err := adaptiveEffort(thinking.Effort, family)
+	effort, err := adaptiveEffort(thinking.Effort)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", err
 	}
-	warnings = append(warnings, effortWarnings...)
 	out := &anthropicThinking{Type: "adaptive"}
-	// The display parameter exists on Opus 4.7 and later; Claude 4.6 models
-	// return summarized thinking by default.
-	if thinking.IncludeOutput && family != familyClaude46 {
+	if thinking.IncludeOutput {
 		out.Display = "summarized"
 	}
-	return out, effort, warnings, nil
+	return out, effort, nil
 }
 
-func adaptiveEffort(effort string, family modelFamily) (string, []litellm.Warning, error) {
+func adaptiveEffort(effort string) (string, error) {
 	value := strings.ToLower(strings.TrimSpace(effort))
 	switch value {
 	case "":
-		return "", nil, nil
+		return "", nil
 	case "minimal":
-		return "low", []litellm.Warning{warning("anthropic.thinking_effort_folded",
-			`effort "minimal" is not supported; mapped to "low"`)}, nil
-	case "xhigh":
-		if family == familyClaude46 {
-			return "max", []litellm.Warning{warning("anthropic.thinking_effort_folded",
-				`effort "xhigh" is not supported on Claude 4.6 models; mapped to "max"`)}, nil
-		}
-		return value, nil, nil
-	case "low", "medium", "high", "max":
-		return value, nil, nil
+		return "", fmt.Errorf(`anthropic: thinking effort "minimal" is not supported with adaptive thinking`)
+	case "low", "medium", "high", "xhigh", "max":
+		return value, nil
 	default:
-		return "", nil, fmt.Errorf("anthropic: unknown thinking effort %q", effort)
-	}
-}
-
-func budgetThinking(thinking *litellm.Thinking, maxTokens int, temperature, topP *float64) (*anthropicThinking, error) {
-	if maxTokens < 1024 {
-		return nil, fmt.Errorf("anthropic: thinking requires max_tokens >= 1024, got %d", maxTokens)
-	}
-	if temperature != nil && *temperature != 1 {
-		return nil, fmt.Errorf("anthropic: temperature must be 1 when thinking is enabled, got %g", *temperature)
-	}
-	if topP != nil && (*topP < 0.95 || *topP > 1) {
-		return nil, fmt.Errorf("anthropic: top_p must be between 0.95 and 1 when thinking is enabled, got %g", *topP)
-	}
-	budget := thinking.BudgetTokens
-	if budget == nil {
-		if strings.TrimSpace(thinking.Effort) != "" {
-			derived := effortToBudget(thinking.Effort)
-			if derived == 0 {
-				return nil, fmt.Errorf("anthropic: unknown thinking effort %q", thinking.Effort)
-			}
-			budget = &derived
-		}
-	}
-	if budget == nil {
-		return nil, fmt.Errorf("anthropic: thinking budget_tokens or effort is required")
-	}
-	if *budget < 1024 {
-		return nil, fmt.Errorf("anthropic: thinking budget_tokens must be >= 1024, got %d", *budget)
-	}
-	if *budget >= maxTokens {
-		return nil, fmt.Errorf("anthropic: thinking budget_tokens must be < max_tokens, got %d >= %d", *budget, maxTokens)
-	}
-	return &anthropicThinking{Type: "enabled", BudgetTokens: budget}, nil
-}
-
-func forcedThinkingToolChoice(choice any) (string, bool) {
-	typ := toolChoiceType(choice)
-	switch typ {
-	case "", "auto", "none":
-		return "", false
-	default:
-		return typ, true
-	}
-}
-
-func toolChoiceType(choice any) string {
-	switch v := choice.(type) {
-	case nil:
-		return ""
-	case string:
-		return v
-	case map[string]any:
-		typ, _ := v["type"].(string)
-		return typ
-	case map[string]string:
-		return v["type"]
-	case json.RawMessage:
-		var decoded struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(v, &decoded); err == nil {
-			return decoded.Type
-		}
-	}
-	data, err := json.Marshal(choice)
-	if err != nil {
-		return ""
-	}
-	var decoded struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return ""
-	}
-	return decoded.Type
-}
-
-func effortToBudget(effort string) int {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal":
-		return 1024
-	case "low":
-		return 2048
-	case "medium":
-		return 8192
-	case "high":
-		return 16384
-	case "xhigh", "max":
-		return 32768
-	default:
-		return 0
+		return "", fmt.Errorf("anthropic: unknown thinking effort %q", effort)
 	}
 }
 

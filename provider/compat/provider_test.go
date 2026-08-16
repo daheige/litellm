@@ -666,8 +666,15 @@ func TestChatDecodeErrorIsStructuredProviderError(t *testing.T) {
 	}
 }
 
-func TestThinkingMapperMustEmitFields(t *testing.T) {
-	provider, err := New(Config{BaseURL: "https://compat.example", HTTPClient: roundTripFunc(nil)}, Spec{
+func TestThinkingMapperMayEmitNoFields(t *testing.T) {
+	called := false
+	provider, err := New(Config{
+		BaseURL: "https://compat.example",
+		HTTPClient: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			called = true
+			return jsonResponse(http.StatusOK, `{"choices":[{"message":{"content":"ok"}}]}`), nil
+		}),
+	}, Spec{
 		Name: "empty-thinking",
 		Request: RequestSpec{
 			Thinking: func(*litellm.Thinking, string) (map[string]any, error) {
@@ -683,8 +690,52 @@ func TestThinkingMapperMustEmitFields(t *testing.T) {
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	})
-	if err == nil || !strings.Contains(err.Error(), "thinking mapper produced no fields") {
-		t.Fatalf("expected empty thinking mapper error, got %v", err)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !called {
+		t.Fatal("request was not sent")
+	}
+}
+
+func TestConvertToolsRequireAllStrict(t *testing.T) {
+	strict := mustTool(t, "strict", "Strict.", map[string]any{"type": "object"})
+	strict.Strict = litellm.StrictEnabled
+	unspecified := mustTool(t, "unspecified", "Unspecified.", map[string]any{"type": "object"})
+
+	tools, _, err := convertTools([]litellm.Tool{strict, unspecified}, StrictToolsRequireAll)
+	if err != nil {
+		t.Fatalf("convertTools: %v", err)
+	}
+	for _, tool := range tools {
+		fn := tool["function"].(map[string]any)
+		if fn["strict"] != true {
+			t.Fatalf("function = %#v, want strict=true", fn)
+		}
+	}
+
+	nonStrict := unspecified
+	nonStrict.Strict = litellm.StrictDisabled
+	if _, _, err := convertTools([]litellm.Tool{strict, nonStrict}, StrictToolsRequireAll); err == nil || !strings.Contains(err.Error(), "all tools") {
+		t.Fatalf("expected mixed strict error, got %v", err)
+	}
+}
+
+func TestConvertToolsAlwaysStrict(t *testing.T) {
+	tool := mustTool(t, "lookup", "Lookup.", map[string]any{"type": "object"})
+	tool.Strict = litellm.StrictEnabled
+	tools, warnings, err := convertTools([]litellm.Tool{tool}, StrictToolsAlways)
+	if err != nil {
+		t.Fatalf("convertTools: %v", err)
+	}
+	fn := tools[0]["function"].(map[string]any)
+	if _, ok := fn["strict"]; ok || len(warnings) != 0 {
+		t.Fatalf("function/warnings = %#v/%#v", fn, warnings)
+	}
+
+	tool.Strict = litellm.StrictDisabled
+	if _, _, err := convertTools([]litellm.Tool{tool}, StrictToolsAlways); err == nil || !strings.Contains(err.Error(), "cannot disable strict") {
+		t.Fatalf("expected strict disable error, got %v", err)
 	}
 }
 

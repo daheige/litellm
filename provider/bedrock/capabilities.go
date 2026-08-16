@@ -15,10 +15,10 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 	if claude {
 		thinking = litellm.ThinkingCapabilities{
 			Supported:    litellm.SupportYes,
-			Disable:      litellm.SupportYes,
-			Efforts:      litellm.PortableThinkingEfforts(),
-			BudgetTokens: litellm.SupportYes,
-			Notes:        []string{"thinking is exposed for Claude models and maps effort to budget_tokens"},
+			Disable:      litellm.SupportUnknown,
+			Efforts:      []string{"low", "medium", "high"},
+			BudgetTokens: litellm.SupportNo,
+			Notes:        []string{"adaptive thinking baseline; disable, xhigh, and max support are model-specific"},
 		}
 	}
 	return litellm.Capabilities{
@@ -32,15 +32,15 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 		},
 		Tools: litellm.ToolCapabilities{
 			Calls:               litellm.SupportYes,
-			StrictSchema:        litellm.SupportYes,
+			StrictSchema:        litellm.SupportPartial,
 			Choice:              litellm.SupportYes,
 			MultimodalResults:   litellm.SupportYes,
 			RoundTripSignatures: litellm.SupportYes,
 		},
 		Structured: litellm.StructuredCapabilities{
-			JSONObject: litellm.SupportUnknown,
-			JSONSchema: litellm.SupportUnknown,
-			Strict:     litellm.SupportNo,
+			JSONObject: litellm.SupportNo,
+			JSONSchema: litellm.SupportPartial,
+			Strict:     litellm.SupportPartial,
 		},
 		Media: litellm.MediaCapabilities{
 			ImageURL:   litellm.SupportNo,

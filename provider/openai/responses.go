@@ -42,9 +42,12 @@ type ResponsesRequest struct {
 
 	ReasoningEffort  string
 	ReasoningSummary string
+	ReasoningMode    string
+	ReasoningContext string
 	Thinking         *litellm.Thinking
 
 	PromptCacheKey       string
+	PromptCacheOptions   *PromptCacheOptions
 	PromptCacheRetention string
 	Metadata             map[string]string
 	SafetyIdentifier     string
@@ -66,6 +69,14 @@ type ResponsesTool map[string]any
 
 type ResponsesStreamOptions struct {
 	IncludeObfuscation *bool `json:"include_obfuscation,omitempty"`
+}
+
+func clonePromptCacheOptions(options *PromptCacheOptions) *PromptCacheOptions {
+	if options == nil {
+		return nil
+	}
+	copy := *options
+	return &copy
 }
 
 func responsesRequestFromChat(req *litellm.Request) *ResponsesRequest {
@@ -124,8 +135,9 @@ type responsesRequest struct {
 
 	Reasoning *responsesReasoning `json:"reasoning,omitempty"`
 
-	PromptCacheKey       string `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
+	PromptCacheKey       string              `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions   *PromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
 
 	Metadata         map[string]string `json:"metadata,omitempty"`
 	SafetyIdentifier string            `json:"safety_identifier,omitempty"`
@@ -153,6 +165,8 @@ type responsesTextFormat struct {
 type responsesReasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Context string `json:"context,omitempty"`
 }
 
 type responsesToolWire struct {
@@ -208,12 +222,13 @@ func (i responsesInputItem) MarshalJSON() ([]byte, error) {
 }
 
 type responsesContentItem struct {
-	Type        string                   `json:"type"`
-	Text        string                   `json:"text,omitempty"`
-	Refusal     string                   `json:"refusal,omitempty"`
-	ImageURL    *responsesImageURL       `json:"image_url,omitempty"`
-	Annotations []map[string]interface{} `json:"annotations,omitempty"`
-	Logprobs    []map[string]interface{} `json:"logprobs,omitempty"`
+	Type                  string                 `json:"type"`
+	Text                  string                 `json:"text,omitempty"`
+	Refusal               string                 `json:"refusal,omitempty"`
+	ImageURL              *responsesImageURL     `json:"image_url,omitempty"`
+	PromptCacheBreakpoint *promptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+	Annotations           []map[string]any       `json:"annotations,omitempty"`
+	Logprobs              []map[string]any       `json:"logprobs,omitempty"`
 }
 
 type responsesImageURL struct {
@@ -296,7 +311,8 @@ type responsesUsage struct {
 }
 
 type responsesInputTokensDetails struct {
-	CachedTokens int `json:"cached_tokens,omitempty"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type responsesOutputTokensDetails struct {
@@ -422,6 +438,7 @@ func (p *Provider) buildResponsesRequest(req *ResponsesRequest, stream bool) (*r
 		ToolChoice:           effective.ToolChoice,
 		ParallelToolCalls:    effective.ParallelToolCalls,
 		PromptCacheKey:       effective.PromptCacheKey,
+		PromptCacheOptions:   clonePromptCacheOptions(effective.PromptCacheOptions),
 		PromptCacheRetention: effective.PromptCacheRetention,
 		Metadata:             cloneStringMap(effective.Metadata),
 		SafetyIdentifier:     effective.SafetyIdentifier,
@@ -500,14 +517,23 @@ func validateResponsesRequest(req *ResponsesRequest, stream bool) error {
 	if err := validateOneOf("truncation", req.Truncation, "auto", "disabled"); err != nil {
 		return fmt.Errorf("openai: %w", err)
 	}
-	if err := validateOneOf("reasoning_effort", req.ReasoningEffort, "none", "low", "medium", "high", "xhigh"); err != nil {
-		return fmt.Errorf("openai: %w", err)
+	if req.ReasoningEffort != "" && !supportsOpenAIReasoningEffortValue(req.ReasoningEffort) {
+		return fmt.Errorf("openai: unsupported reasoning_effort %q", req.ReasoningEffort)
 	}
 	if err := validateOneOf("reasoning_summary", req.ReasoningSummary, "auto", "concise", "detailed"); err != nil {
 		return fmt.Errorf("openai: %w", err)
 	}
 	if err := validateOneOf("service_tier", req.ServiceTier, "auto", "default", "flex", "priority"); err != nil {
 		return fmt.Errorf("openai: %w", err)
+	}
+	if err := validateOneOf("reasoning_mode", req.ReasoningMode, "standard", "pro"); err != nil {
+		return fmt.Errorf("openai: %w", err)
+	}
+	if err := validateOneOf("reasoning_context", req.ReasoningContext, "auto", "current_turn", "all_turns"); err != nil {
+		return fmt.Errorf("openai: %w", err)
+	}
+	if err := validatePromptCacheOptions(req.PromptCacheOptions); err != nil {
+		return err
 	}
 	if err := validatePromptCacheRetention(req.PromptCacheRetention); err != nil {
 		return err
@@ -553,6 +579,12 @@ func applyResponsesProviderOptions(req *ResponsesRequest, stream bool) error {
 				return err
 			}
 			req.PromptCacheKey = v
+		case ProviderOptionPromptCacheOptions:
+			v, err := optionPromptCacheOptions(key, value)
+			if err != nil {
+				return err
+			}
+			req.PromptCacheOptions = v
 		case ProviderOptionPromptCacheRetention:
 			v, err := optionString(key, value)
 			if err != nil {
@@ -622,6 +654,10 @@ func responsesInstructions(messages []litellm.Message) (string, []litellm.Messag
 	filtered := make([]litellm.Message, 0, len(messages))
 	for i, msg := range messages {
 		if msg.Role == litellm.RoleSystem {
+			if blocksHaveCacheBreakpoint(msg.Blocks) {
+				filtered = append(filtered, msg)
+				continue
+			}
 			text, err := textOnlyBlocks(msg.Blocks)
 			if err != nil {
 				return "", nil, fmt.Errorf("openai: responses system message[%d]: %w", i, err)
@@ -636,6 +672,34 @@ func responsesInstructions(messages []litellm.Message) (string, []litellm.Messag
 	return strings.TrimSpace(strings.Join(parts, "\n")), filtered, nil
 }
 
+func blocksHaveCacheBreakpoint(blocks []litellm.Block) bool {
+	for _, block := range blocks {
+		switch value := block.(type) {
+		case litellm.TextBlock:
+			if value.Cache != nil {
+				return true
+			}
+		case litellm.ImageBlock:
+			if value.Cache != nil {
+				return true
+			}
+		case litellm.ReasoningBlock:
+			if value.Cache != nil {
+				return true
+			}
+		case litellm.ToolUseBlock:
+			if value.Cache != nil {
+				return true
+			}
+		case litellm.ToolResultBlock:
+			if value.Cache != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func responsesInputString(messages []litellm.Message) (string, bool) {
 	if len(messages) != 1 || messages[0].Role != litellm.RoleUser {
 		return "", false
@@ -644,20 +708,24 @@ func responsesInputString(messages []litellm.Message) (string, bool) {
 		return "", false
 	}
 	text, ok := messages[0].Blocks[0].(litellm.TextBlock)
-	return text.Text, ok && text.Text != ""
+	return text.Text, ok && text.Text != "" && text.Cache == nil
 }
 
 func responsesInputItems(messages []litellm.Message) ([]responsesInputItem, error) {
 	items := make([]responsesInputItem, 0, len(messages))
 	for i, msg := range messages {
 		switch msg.Role {
-		case litellm.RoleUser:
+		case litellm.RoleSystem, litellm.RoleUser:
 			content, err := responsesContent(msg.Blocks, "input_text")
 			if err != nil {
 				return nil, fmt.Errorf("openai: responses messages[%d]: %w", i, err)
 			}
 			if len(content) > 0 {
-				items = append(items, responsesInputItem{Type: "message", Role: "user", Content: content})
+				role := "user"
+				if msg.Role == litellm.RoleSystem {
+					role = "developer"
+				}
+				items = append(items, responsesInputItem{Type: "message", Role: role, Content: content})
 			}
 		case litellm.RoleAssistant:
 			for _, block := range msg.Blocks {
@@ -671,12 +739,18 @@ func responsesInputItems(messages []litellm.Message) ([]responsesInputItem, erro
 						items = append(items, responsesInputItem{Type: "message", Role: "assistant", Content: content})
 					}
 				case litellm.ReasoningBlock:
+					if b.Cache != nil {
+						return nil, fmt.Errorf("openai: responses messages[%d]: cache breakpoints are not supported on reasoning blocks", i)
+					}
 					item, err := responsesReasoningInputItem(b)
 					if err != nil {
 						return nil, fmt.Errorf("openai: responses messages[%d]: %w", i, err)
 					}
 					items = append(items, item)
 				case litellm.ToolUseBlock:
+					if b.Cache != nil {
+						return nil, fmt.Errorf("openai: responses messages[%d]: cache breakpoints are not supported on tool use blocks", i)
+					}
 					items = append(items, responsesInputItem{
 						Type:      "function_call",
 						CallID:    b.ID,
@@ -692,6 +766,9 @@ func responsesInputItems(messages []litellm.Message) ([]responsesInputItem, erro
 				result, ok := block.(litellm.ToolResultBlock)
 				if !ok {
 					return nil, fmt.Errorf("tool role only supports ToolResultBlock, got %T", block)
+				}
+				if result.Cache != nil {
+					return nil, fmt.Errorf("openai: responses messages[%d]: cache breakpoints are not supported on tool result blocks", i)
 				}
 				output, err := textOnlyBlocks(result.Content)
 				if err != nil {
@@ -716,14 +793,27 @@ func responsesContent(blocks []litellm.Block, textType string) ([]responsesConte
 		switch b := block.(type) {
 		case litellm.TextBlock:
 			if b.Text != "" {
-				items = append(items, responsesContentItem{Type: textType, Text: b.Text})
+				breakpoint, err := convertPromptCacheBreakpoint(b.Cache)
+				if err != nil {
+					return nil, err
+				}
+				if breakpoint != nil && textType != "input_text" {
+					return nil, fmt.Errorf("cache breakpoints are only supported on Responses input blocks")
+				}
+				items = append(items, responsesContentItem{Type: textType, Text: b.Text, PromptCacheBreakpoint: breakpoint})
+			} else if b.Cache != nil {
+				return nil, fmt.Errorf("cache breakpoint requires a non-empty text block")
 			}
 		case litellm.ImageBlock:
 			url, err := imageURLValue(b)
 			if err != nil {
 				return nil, err
 			}
-			items = append(items, responsesContentItem{Type: "input_image", ImageURL: &responsesImageURL{URL: url, Detail: b.Detail}})
+			breakpoint, err := convertPromptCacheBreakpoint(b.Cache)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, responsesContentItem{Type: "input_image", ImageURL: &responsesImageURL{URL: url, Detail: b.Detail}, PromptCacheBreakpoint: breakpoint})
 		case litellm.ToolUseBlock:
 			continue
 		case litellm.ReasoningBlock:
@@ -762,6 +852,9 @@ func textOnlyBlocks(blocks []litellm.Block) (string, error) {
 	for _, block := range blocks {
 		switch b := block.(type) {
 		case litellm.TextBlock:
+			if b.Cache != nil {
+				return "", fmt.Errorf("cache breakpoints are not supported inside tool result content")
+			}
 			if out.Len() > 0 {
 				out.WriteString("\n")
 			}
@@ -817,10 +910,10 @@ func responsesReasoningConfig(req *ResponsesRequest) (*responsesReasoning, error
 	if err := req.Thinking.Validate(); err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
-	if req.ReasoningEffort == "" && req.ReasoningSummary == "" && (req.Thinking == nil || req.Thinking.Mode == litellm.ThinkingUnspecified) {
+	if req.ReasoningEffort == "" && req.ReasoningSummary == "" && req.ReasoningMode == "" && req.ReasoningContext == "" && (req.Thinking == nil || req.Thinking.Mode == litellm.ThinkingUnspecified) {
 		return nil, nil
 	}
-	out := &responsesReasoning{Effort: req.ReasoningEffort, Summary: req.ReasoningSummary}
+	out := &responsesReasoning{Effort: req.ReasoningEffort, Summary: req.ReasoningSummary, Mode: req.ReasoningMode, Context: req.ReasoningContext}
 	if out.Effort != "" && req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingDisabled {
 		return nil, fmt.Errorf("openai: thinking disabled conflicts with reasoning_effort")
 	}
@@ -831,20 +924,20 @@ func responsesReasoningConfig(req *ResponsesRequest) (*responsesReasoning, error
 		case litellm.ThinkingEnabled:
 			if out.Effort == "" {
 				out.Effort = req.Thinking.Effort
+				if out.Effort == "" {
+					out.Effort = "medium"
+				}
 			}
 			if out.Summary == "" && req.Thinking.IncludeOutput {
 				out.Summary = "auto"
 			}
-			if out.Effort == "" && out.Summary == "" {
-				return nil, fmt.Errorf("openai: thinking effort, summary, or include_output is required")
-			}
 		}
 	}
-	if out.Effort == "" && out.Summary == "" {
+	if out.Effort == "" && out.Summary == "" && out.Mode == "" && out.Context == "" {
 		return nil, nil
 	}
-	if err := validateOneOf("reasoning_effort", out.Effort, "none", "low", "medium", "high", "xhigh"); err != nil {
-		return nil, fmt.Errorf("openai: %w", err)
+	if out.Effort != "" && !supportsOpenAIReasoningEffortValue(out.Effort) {
+		return nil, fmt.Errorf("openai: unsupported reasoning_effort %q", out.Effort)
 	}
 	return out, nil
 }
@@ -912,6 +1005,7 @@ func convertResponsesResponse(resp *responsesResponse, fallbackModel string) (*l
 	}
 	if resp.Usage.InputTokensDetails != nil {
 		out.Usage.CacheReadTokens = resp.Usage.InputTokensDetails.CachedTokens
+		out.Usage.CacheWriteTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
 	}
 	if resp.Usage.OutputTokensDetails != nil {
 		out.Usage.ReasoningTokens = resp.Usage.OutputTokensDetails.ReasoningTokens
@@ -1311,6 +1405,7 @@ func responsesUsageToUsage(u responsesUsage, model string) litellm.Usage {
 	}
 	if u.InputTokensDetails != nil {
 		out.CacheReadTokens = u.InputTokensDetails.CachedTokens
+		out.CacheWriteTokens = u.InputTokensDetails.CacheWriteTokens
 	}
 	if u.OutputTokensDetails != nil {
 		out.ReasoningTokens = u.OutputTokensDetails.ReasoningTokens

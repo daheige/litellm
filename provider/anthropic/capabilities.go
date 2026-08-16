@@ -7,9 +7,12 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 		Provider: p.Name(),
 		Model:    model,
 		Thinking: litellm.ThinkingCapabilities{
-			Supported: litellm.SupportYes,
-			Disable:   litellm.SupportYes,
-			Efforts:   litellm.PortableThinkingEfforts(),
+			Supported:     litellm.SupportYes,
+			Disable:       litellm.SupportUnknown,
+			Efforts:       []string{"low", "medium", "high"},
+			BudgetTokens:  litellm.SupportNo,
+			IncludeOutput: litellm.SupportYes,
+			Notes:         []string{"adaptive thinking baseline; disable, xhigh, and max support are model-specific"},
 		},
 		Reasoning: litellm.ReasoningCapabilities{
 			Blocks:          litellm.SupportYes,
@@ -54,36 +57,6 @@ func (p *Provider) Capabilities(model string) litellm.Capabilities {
 			CacheReadTokens:  litellm.SupportYes,
 			CacheWriteTokens: litellm.SupportYes,
 		},
-	}
-	switch classifyModel(model) {
-	case familyAlwaysThinking:
-		caps.Thinking.Disable = litellm.SupportNo
-		caps.Thinking.BudgetTokens = litellm.SupportNo
-		caps.Thinking.IncludeOutput = litellm.SupportYes
-		caps.Thinking.Notes = []string{
-			"thinking is always on; disabled requests omit the thinking field with a warning",
-			"effort maps to output_config.effort; minimal maps to low",
-		}
-	case familyAdaptive:
-		caps.Thinking.BudgetTokens = litellm.SupportNo
-		caps.Thinking.IncludeOutput = litellm.SupportYes
-		caps.Thinking.Notes = []string{
-			"adaptive thinking; effort maps to output_config.effort; minimal maps to low",
-			"budget_tokens is dropped with a warning",
-		}
-	case familyClaude46:
-		caps.Thinking.BudgetTokens = litellm.SupportPartial
-		caps.Thinking.IncludeOutput = litellm.SupportNo
-		caps.Thinking.Notes = []string{
-			"adaptive thinking unless budget_tokens is set (deprecated escape hatch)",
-			"effort maps to output_config.effort; minimal maps to low, xhigh maps to max",
-		}
-	default:
-		caps.Thinking.BudgetTokens = litellm.SupportYes
-		caps.Thinking.IncludeOutput = litellm.SupportNo
-		caps.Thinking.Notes = []string{
-			"extended thinking; effort maps to budget_tokens and requires max_tokens headroom",
-		}
 	}
 	return caps
 }

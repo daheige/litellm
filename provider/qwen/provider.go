@@ -2,6 +2,7 @@ package qwen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/voocel/litellm"
 	"github.com/voocel/litellm/provider/compat"
@@ -72,10 +73,12 @@ func New(cfg Config) (*compat.Provider, error) {
 			ReasoningFields: []string{"reasoning_content"},
 		},
 		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Thinking.Supported = litellm.SupportPartial
+			caps.Thinking.Disable = litellm.SupportPartial
 			caps.Thinking.Efforts = nil
-			caps.Thinking.BudgetTokens = litellm.SupportYes
+			caps.Thinking.BudgetTokens = litellm.SupportPartial
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"use BudgetTokens; Effort is rejected"}
+			caps.Thinking.Notes = []string{"thinking mode and budget support are model-specific; Effort is rejected"}
 			return caps
 		},
 	})
@@ -85,7 +88,7 @@ func Factory(cfg Config) (litellm.Provider, error) {
 	return New(cfg)
 }
 
-func mapThinking(thinking *litellm.Thinking, _ string) (map[string]any, error) {
+func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, error) {
 	if thinking == nil || thinking.Mode == litellm.ThinkingUnspecified {
 		return nil, nil
 	}
@@ -98,9 +101,28 @@ func mapThinking(thinking *litellm.Thinking, _ string) (map[string]any, error) {
 	if thinking.Effort != "" {
 		return nil, fmt.Errorf("qwen: thinking effort is not supported; use budget_tokens")
 	}
-	body := map[string]any{"enable_thinking": true}
+	body := map[string]any{}
+	if !thinkingOnly(model) {
+		body["enable_thinking"] = true
+	}
 	if thinking.BudgetTokens != nil {
+		if *thinking.BudgetTokens <= 0 {
+			return nil, fmt.Errorf("qwen: thinking budget_tokens must be positive")
+		}
 		body["thinking_budget"] = *thinking.BudgetTokens
 	}
 	return body, nil
+}
+
+func thinkingOnly(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(model, "-thinking") || strings.HasPrefix(model, "qwq-") || strings.HasPrefix(model, "qvq-") {
+		return true
+	}
+	switch model {
+	case "qwen3.7-max-preview", "qwen3.7-max-2026-05-17":
+		return true
+	default:
+		return false
+	}
 }

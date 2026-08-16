@@ -28,18 +28,14 @@ func New(cfg Config) (*compat.Provider, error) {
 			ModelFromResponse:         true,
 			HasCompletionTokenDetails: true,
 		},
-		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
-			if !supportsReasoningEffort(model) {
-				caps.Thinking.Supported = litellm.SupportNo
-				caps.Thinking.Disable = litellm.SupportNo
-				caps.Thinking.Efforts = nil
-			} else {
-				caps.Thinking.Supported = litellm.SupportYes
-				caps.Thinking.Efforts = []string{"low", "medium", "high"}
-			}
+		Features: compat.FeatureSpec{StrictTools: compat.StrictToolsAlways},
+		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Thinking.Supported = litellm.SupportPartial
+			caps.Thinking.Disable = litellm.SupportPartial
+			caps.Thinking.Efforts = []string{"low", "medium", "high"}
 			caps.Thinking.BudgetTokens = litellm.SupportNo
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"reasoning_effort is supported for grok-4.3 and aliases; use ThinkingDisabled to send none"}
+			caps.Thinking.Notes = []string{"reasoning support, disable behavior, and xhigh acceptance are model-specific"}
 			caps.Structured.JSONSchema = litellm.SupportYes
 			caps.Structured.Strict = litellm.SupportYes
 			return caps
@@ -52,12 +48,13 @@ func Factory(cfg Config) (litellm.Provider, error) {
 }
 
 func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, req *litellm.Request) error {
-	if supportsReasoningEffort(req.Model) && len(req.Stop) > 0 {
-		return fmt.Errorf("grok: stop is not supported for grok-4.3 reasoning models")
+	reasoningEnabled := req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingEnabled
+	if reasoningEnabled && len(req.Stop) > 0 {
+		return fmt.Errorf("grok: stop is not supported for reasoning models")
 	}
 	for key, value := range options {
-		if supportsReasoningEffort(req.Model) && isUnsupportedReasoningOption(key) {
-			return fmt.Errorf("grok: provider option %q is not supported for grok-4.3 reasoning models", key)
+		if reasoningEnabled && isUnsupportedReasoningOption(key) {
+			return fmt.Errorf("grok: provider option %q is not supported for reasoning models", key)
 		}
 		if _, exists := body[key]; exists {
 			return fmt.Errorf("grok: provider option %q conflicts with generated request field", key)
@@ -67,12 +64,9 @@ func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, re
 	return nil
 }
 
-func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, error) {
+func mapThinking(thinking *litellm.Thinking, _ string) (map[string]any, error) {
 	if thinking == nil || thinking.Mode == litellm.ThinkingUnspecified {
 		return nil, nil
-	}
-	if !supportsReasoningEffort(model) {
-		return nil, fmt.Errorf("grok: reasoning_effort is only supported for grok-4.3 and aliases")
 	}
 	if thinking.Mode == litellm.ThinkingDisabled {
 		return map[string]any{"reasoning_effort": "none"}, nil
@@ -87,17 +81,7 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 		}
 		return map[string]any{"reasoning_effort": effort}, nil
 	}
-	return nil, fmt.Errorf("grok: thinking effort is required")
-}
-
-func supportsReasoningEffort(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	switch model {
-	case "grok-4.3", "grok-4.3-latest", "grok-latest":
-		return true
-	default:
-		return false
-	}
+	return map[string]any{"reasoning_effort": "high"}, nil
 }
 
 func isUnsupportedReasoningOption(key string) bool {
@@ -112,9 +96,9 @@ func isUnsupportedReasoningOption(key string) bool {
 func reasoningEffort(effort string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(effort))
 	switch normalized {
-	case "low", "medium", "high":
+	case "low", "medium", "high", "xhigh":
 		return normalized, nil
 	default:
-		return "", fmt.Errorf("grok: unsupported reasoning_effort %q; use low, medium, or high", effort)
+		return "", fmt.Errorf("grok: unsupported reasoning_effort %q; use low, medium, high, or xhigh", effort)
 	}
 }

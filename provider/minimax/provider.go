@@ -43,15 +43,22 @@ func New(cfg Config) (*compat.Provider, error) {
 			ContentCumulativeCondition: "thinking_enabled",
 		},
 		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Tools.Choice = litellm.SupportPartial
 			caps.Thinking.Efforts = nil
 			caps.Thinking.BudgetTokens = litellm.SupportNo
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"thinking is adaptive; unspecified thinking is treated as enabled for reasoning_split"}
+			caps.Thinking.Notes = []string{"reasoning_split only separates reasoning output; it does not enable thinking"}
 			if isM2(model) {
+				caps.Thinking.Supported = litellm.SupportYes
 				caps.Thinking.Disable = litellm.SupportNo
-				caps.Thinking.Notes = append(caps.Thinking.Notes, "disabling thinking is rejected for M2.x models")
+				caps.Thinking.Notes = append(caps.Thinking.Notes, "M2.x always reasons and does not accept the M3 thinking parameter")
+			} else if isM3(model) {
+				caps.Thinking.Supported = litellm.SupportYes
+				caps.Thinking.Disable = litellm.SupportYes
+				caps.Thinking.Notes = append(caps.Thinking.Notes, "M3 supports adaptive or disabled thinking")
 			} else {
-				caps.Thinking.Disable = litellm.SupportPartial
+				caps.Thinking.Supported = litellm.SupportUnknown
+				caps.Thinking.Disable = litellm.SupportUnknown
 			}
 			return caps
 		},
@@ -72,6 +79,9 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 		if isM2(model) {
 			return nil, fmt.Errorf("minimax: thinking cannot be disabled for M2.x models")
 		}
+		if !isM3(model) {
+			return nil, fmt.Errorf("minimax: thinking controls are not supported for %s", model)
+		}
 		thinkingType = "disabled"
 	case litellm.ThinkingEnabled:
 		if thinking.Effort != "" {
@@ -79,6 +89,12 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 		}
 		if thinking.BudgetTokens != nil {
 			return nil, fmt.Errorf("minimax: thinking budget_tokens is not supported")
+		}
+		if isM2(model) {
+			return map[string]any{"reasoning_split": true}, nil
+		}
+		if !isM3(model) {
+			return nil, fmt.Errorf("minimax: thinking controls are not supported for %s", model)
 		}
 		thinkingType = "adaptive"
 	default:
@@ -92,6 +108,9 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 }
 
 func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, req *litellm.Request) error {
+	if err := validateToolChoice(req.ToolChoice); err != nil {
+		return err
+	}
 	if effectiveThinkingEnabled(req) {
 		body["reasoning_split"] = true
 	}
@@ -114,13 +133,33 @@ func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, re
 	return nil
 }
 
+func validateToolChoice(choice litellm.ToolChoice) error {
+	if choice == nil {
+		return nil
+	}
+	value, ok := choice.(string)
+	if !ok {
+		return fmt.Errorf(`minimax: tool_choice only supports "auto" or "none"`)
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "none":
+		return nil
+	default:
+		return fmt.Errorf(`minimax: tool_choice only supports "auto" or "none"`)
+	}
+}
+
 func effectiveThinkingEnabled(req *litellm.Request) bool {
 	if req.Thinking == nil || req.Thinking.Mode == litellm.ThinkingUnspecified {
-		return true
+		return isM2(req.Model) || isM3(req.Model)
 	}
 	return req.Thinking.Mode == litellm.ThinkingEnabled
 }
 
 func isM2(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "minimax-m2")
+}
+
+func isM3(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "minimax-m3")
 }

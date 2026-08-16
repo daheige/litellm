@@ -6,16 +6,16 @@ import (
 	"github.com/voocel/litellm"
 )
 
-func TestCapabilitiesReasoningModel(t *testing.T) {
+func TestCapabilitiesCurrentBaseline(t *testing.T) {
 	provider := mustProvider(t)
-	caps := provider.Capabilities("gpt-5.1")
-	if caps.Provider != "openai" || caps.Model != "gpt-5.1" {
+	caps := provider.Capabilities("gpt-5.6")
+	if caps.Provider != "openai" || caps.Model != "gpt-5.6" {
 		t.Fatalf("caps = %+v", caps)
 	}
-	if caps.Thinking.Supported != litellm.SupportPartial || caps.Thinking.Disable != litellm.SupportYes {
+	if caps.Thinking.Supported != litellm.SupportPartial || caps.Thinking.Disable != litellm.SupportPartial {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
-	if !caps.Thinking.SupportsEffort("xhigh") || caps.Thinking.SupportsEffort("minimal") {
+	if !caps.Thinking.SupportsEffort("high") || !caps.Thinking.SupportsEffort("xhigh") || !caps.Thinking.SupportsEffort("max") || caps.Thinking.SupportsEffort("minimal") {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
 	if caps.Streaming.NativeResponses != litellm.SupportYes {
@@ -23,11 +23,21 @@ func TestCapabilitiesReasoningModel(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesNonReasoningModel(t *testing.T) {
+func TestCapabilitiesUseStableProviderBaseline(t *testing.T) {
 	provider := mustProvider(t)
-	caps := provider.Capabilities("gpt-4.1")
-	if caps.Thinking.Supported != litellm.SupportNo || len(caps.Thinking.Efforts) != 0 {
-		t.Fatalf("thinking caps = %+v", caps.Thinking)
+	caps := provider.Capabilities("gpt-5.6")
+	if !caps.Thinking.SupportsEffort("max") || caps.Cache.UsageWrite != litellm.SupportPartial {
+		t.Fatalf("gpt-5.6 caps = %+v", caps)
+	}
+
+	future := provider.Capabilities("gpt-6")
+	if future.Thinking.Disable != litellm.SupportPartial || !future.Thinking.SupportsEffort("max") || future.Tools.Calls != litellm.SupportYes {
+		t.Fatalf("future GPT-5 baseline = %+v", future)
+	}
+
+	nonReasoning := provider.Capabilities("gpt-4.1")
+	if nonReasoning.Thinking.Supported != litellm.SupportPartial || !nonReasoning.Thinking.SupportsEffort("max") {
+		t.Fatalf("provider baseline changed by model = %+v", nonReasoning.Thinking)
 	}
 }
 
@@ -65,6 +75,9 @@ func TestCapabilitiesStructuredOutputsByEndpoint(t *testing.T) {
 	if got := provider.Capabilities("gpt-4o").Structured.JSONObject; got != litellm.SupportUnknown {
 		t.Fatalf("custom base URL json_object = %v, want unknown", got)
 	}
+	if got := provider.Capabilities("gpt-5.7").Streaming.Supported; got != litellm.SupportYes {
+		t.Fatalf("custom base URL streaming = %v, want yes", got)
+	}
 }
 
 // TestCapabilitiesPromptCacheParamsGating verifies that prompt cache params
@@ -89,8 +102,8 @@ func TestCapabilitiesPromptCacheParamsGating(t *testing.T) {
 				t.Fatalf("New returned error: %v", err)
 			}
 			caps := provider.Capabilities("gpt-4.1")
-			if caps.Cache.PromptKey != tc.want || caps.Cache.Retention != tc.want {
-				t.Fatalf("prompt cache caps = (key=%v retention=%v), want %v", caps.Cache.PromptKey, caps.Cache.Retention, tc.want)
+			if caps.Cache.Block != tc.want || caps.Cache.PromptKey != tc.want || caps.Cache.Retention != tc.want {
+				t.Fatalf("prompt cache caps = (block=%v key=%v retention=%v), want %v", caps.Cache.Block, caps.Cache.PromptKey, caps.Cache.Retention, tc.want)
 			}
 		})
 	}

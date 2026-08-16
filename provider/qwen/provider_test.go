@@ -139,11 +139,23 @@ func TestCapabilities(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	caps := p.Capabilities("qwen3-max")
-	if caps.Thinking.Supported != litellm.SupportYes || caps.Thinking.BudgetTokens != litellm.SupportYes {
+	if caps.Thinking.Supported != litellm.SupportPartial || caps.Thinking.Disable != litellm.SupportPartial || caps.Thinking.BudgetTokens != litellm.SupportPartial {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
 	if caps.Thinking.SupportsEffort("high") {
 		t.Fatalf("qwen should not advertise effort support: %+v", caps.Thinking)
+	}
+}
+
+func TestFutureQwenModelPassesCurrentThinkingFields(t *testing.T) {
+	budget := 4096
+	body := captureBody(t, &litellm.Request{
+		Model:    "qwen4-plus",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
+	})
+	if body["enable_thinking"] != true || body["thinking_budget"] != float64(4096) {
+		t.Fatalf("body = %#v", body)
 	}
 }
 

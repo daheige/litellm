@@ -315,26 +315,9 @@ func convertGenerationConfig(req *litellm.Request) (*generationConfig, error) {
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	if req.Thinking != nil && req.Thinking.Mode != litellm.ThinkingUnspecified {
-		includeThoughts := req.Thinking.Mode == litellm.ThinkingEnabled
-		tc := &thinkingConfig{IncludeThoughts: &includeThoughts}
-		if includeThoughts {
-			effort := thinkingEffort(req.Thinking)
-			if usesThinkingLevel(req.Model) {
-				if effort != "" {
-					tc.ThinkingLevel = effort
-				} else {
-					tc.ThinkingBudget = req.Thinking.BudgetTokens
-				}
-			} else {
-				tc.ThinkingBudget = req.Thinking.BudgetTokens
-				if tc.ThinkingBudget == nil && effort != "" {
-					budget := effortToBudget(effort)
-					if budget == 0 {
-						return nil, fmt.Errorf("gemini: unknown thinking effort %q", effort)
-					}
-					tc.ThinkingBudget = &budget
-				}
-			}
+		tc, err := convertThinkingConfig(req.Model, req.Thinking)
+		if err != nil {
+			return nil, err
 		}
 		out.ThinkingConfig = tc
 	}
@@ -436,37 +419,44 @@ func convertToolChoice(choice any, strict bool) (*toolConfig, error) {
 }
 
 func usesThinkingLevel(model string) bool {
-	_, after, ok := strings.Cut(strings.ToLower(model), "gemini-")
+	model = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model)), "models/")
+	version, ok := strings.CutPrefix(model, "gemini-")
 	if !ok {
 		return false
 	}
-	var major int
-	fmt.Sscanf(after, "%d", &major)
-	return major >= 3
-}
-
-func thinkingEffort(thinking *litellm.Thinking) string {
-	if thinking == nil {
-		return ""
+	if end := strings.IndexAny(version, ".-"); end >= 0 {
+		version = version[:end]
 	}
-	return thinking.Effort
+	major, err := strconv.Atoi(version)
+	return err == nil && major >= 3
 }
 
-func effortToBudget(effort string) int {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal":
-		return 1024
-	case "low":
-		return 2048
-	case "medium":
-		return 8192
-	case "high":
-		return 16384
-	case "xhigh", "max":
-		return 32768
+func convertThinkingConfig(model string, thinking *litellm.Thinking) (*thinkingConfig, error) {
+	if !usesThinkingLevel(model) {
+		return nil, fmt.Errorf("gemini: thinking is not supported for %s", model)
+	}
+	if thinking.Mode == litellm.ThinkingDisabled {
+		return nil, fmt.Errorf("gemini: thinking cannot be disabled for %s", model)
+	}
+	if thinking.Mode != litellm.ThinkingEnabled {
+		return nil, fmt.Errorf("gemini: unsupported thinking mode %d", thinking.Mode)
+	}
+	tc := &thinkingConfig{}
+	if thinking.IncludeOutput {
+		include := true
+		tc.IncludeThoughts = &include
+	}
+	if thinking.BudgetTokens != nil {
+		return nil, fmt.Errorf("gemini: budget_tokens is not supported for %s; use effort", model)
+	}
+	level := strings.ToLower(strings.TrimSpace(thinking.Effort))
+	switch level {
+	case "", "minimal", "low", "medium", "high":
 	default:
-		return 0
+		return nil, fmt.Errorf("gemini: thinking effort %q is not supported for %s", thinking.Effort, model)
 	}
+	tc.ThinkingLevel = level
+	return tc, nil
 }
 
 func parseDataURL(url string) (mimeType, data string, ok bool) {

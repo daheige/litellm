@@ -11,11 +11,12 @@ import (
 
 func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*chatRequest, error) {
 	out := &chatRequest{
-		Model:      req.Model,
-		Stream:     stream,
-		TopP:       req.TopP,
-		Stop:       append([]string(nil), req.Stop...),
-		ToolChoice: req.ToolChoice,
+		Model:       req.Model,
+		Stream:      stream,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stop:        append([]string(nil), req.Stop...),
+		ToolChoice:  req.ToolChoice,
 	}
 	if stream {
 		out.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -28,26 +29,21 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*chatRequest
 	}
 	if p.isReasoningModel(req.Model) {
 		out.MaxCompletionTokens = req.MaxTokens
-		out.TopP = nil
 		if req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingDisabled {
 			out.ReasoningEffort = "none"
 		}
 		if req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingEnabled {
 			effort := reasoningEffort(req.Thinking)
-			if !isOpenAIReasoningEffort(effort) {
-				return nil, fmt.Errorf("openai: unsupported reasoning_effort %q; use low, medium, high, or xhigh", effort)
+			if effort == "" {
+				effort = "medium"
+			}
+			if !supportsOpenAIReasoningEffort(effort) {
+				return nil, fmt.Errorf("openai: unsupported reasoning_effort %q; use %s", effort, strings.Join(openAIReasoningEfforts(), ", "))
 			}
 			out.ReasoningEffort = effort
 		}
-		if req.Temperature != nil {
-			return nil, fmt.Errorf("openai: temperature is not supported for reasoning chat models")
-		}
 	} else {
 		out.MaxTokens = req.MaxTokens
-		out.Temperature = req.Temperature
-	}
-	if req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingEnabled && out.ReasoningEffort == "" && p.isReasoningModel(req.Model) {
-		return nil, fmt.Errorf("openai: thinking effort is required for reasoning chat models")
 	}
 	if req.ResponseFormat != nil {
 		converted, err := convertResponseFormat(req.ResponseFormat)
@@ -77,11 +73,13 @@ func (p *Provider) buildRequest(req *litellm.Request, stream bool) (*chatRequest
 }
 
 func (p *Provider) isReasoningModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if _, after, ok := strings.Cut(model, "/"); ok {
-		model = after
+	model = openAIModelName(model)
+	if strings.Contains(model, "chat") {
+		return false
 	}
-	return strings.HasPrefix(model, "gpt-5")
+	var major int
+	_, err := fmt.Sscanf(model, "gpt-%d", &major)
+	return err == nil && major >= 5
 }
 
 func reasoningEffort(thinking *litellm.Thinking) string {
@@ -91,13 +89,32 @@ func reasoningEffort(thinking *litellm.Thinking) string {
 	return thinking.Effort
 }
 
-func isOpenAIReasoningEffort(effort string) bool {
-	switch effort {
-	case "low", "medium", "high", "xhigh":
-		return true
-	default:
-		return false
+func openAIModelName(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if _, after, ok := strings.Cut(model, "/"); ok {
+		return after
 	}
+	return model
+}
+
+func openAIReasoningEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh", "max"}
+}
+
+func supportsOpenAIReasoningEffort(effort string) bool {
+	for _, supported := range openAIReasoningEfforts() {
+		if effort == supported {
+			return true
+		}
+	}
+	return false
+}
+
+func supportsOpenAIReasoningEffortValue(effort string) bool {
+	if effort == "none" {
+		return true
+	}
+	return supportsOpenAIReasoningEffort(effort)
 }
 
 func convertMessages(messages []litellm.Message) ([]chatMessage, error) {
@@ -137,9 +154,16 @@ func convertMessageBlocks(blocks []litellm.Block) (any, []toolCall, string, erro
 		switch b := block.(type) {
 		case litellm.TextBlock:
 			if b.Text == "" {
+				if b.Cache != nil {
+					return nil, nil, "", fmt.Errorf("openai: cache breakpoint requires a non-empty text block")
+				}
 				continue
 			}
-			parts = append(parts, contentPart{Type: "text", Text: b.Text})
+			breakpoint, err := convertPromptCacheBreakpoint(b.Cache)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			parts = append(parts, contentPart{Type: "text", Text: b.Text, PromptCacheBreakpoint: breakpoint})
 			if text.Len() > 0 {
 				text.WriteString("\n")
 			}
@@ -149,14 +173,22 @@ func convertMessageBlocks(blocks []litellm.Block) (any, []toolCall, string, erro
 			if err != nil {
 				return nil, nil, "", err
 			}
+			breakpoint, err := convertPromptCacheBreakpoint(b.Cache)
+			if err != nil {
+				return nil, nil, "", err
+			}
 			parts = append(parts, contentPart{
 				Type: "image_url",
 				ImageURL: &imageURL{
 					URL:    url,
 					Detail: b.Detail,
 				},
+				PromptCacheBreakpoint: breakpoint,
 			})
 		case litellm.ToolUseBlock:
+			if b.Cache != nil {
+				return nil, nil, "", fmt.Errorf("OpenAI Chat does not support cache breakpoints on tool use blocks")
+			}
 			toolCalls = append(toolCalls, toolCall{
 				ID:   b.ID,
 				Type: "function",
@@ -166,6 +198,9 @@ func convertMessageBlocks(blocks []litellm.Block) (any, []toolCall, string, erro
 				},
 			})
 		case litellm.ReasoningBlock:
+			if b.Cache != nil {
+				return nil, nil, "", fmt.Errorf("OpenAI Chat does not support cache breakpoints on reasoning blocks")
+			}
 			if b.Signature != "" || len(b.Redacted) > 0 || len(b.Extra) > 0 {
 				return nil, nil, "", fmt.Errorf("OpenAI Chat does not accept signed, redacted, or provider-extra reasoning blocks in message history")
 			}
@@ -183,7 +218,7 @@ func convertMessageBlocks(blocks []litellm.Block) (any, []toolCall, string, erro
 	if len(parts) == 0 {
 		return nil, toolCalls, reasoningText, nil
 	}
-	if len(parts) == 1 && parts[0].Type == "text" {
+	if len(parts) == 1 && parts[0].Type == "text" && parts[0].PromptCacheBreakpoint == nil {
 		return text.String(), toolCalls, reasoningText, nil
 	}
 	return parts, toolCalls, reasoningText, nil
@@ -200,13 +235,34 @@ func convertToolMessage(blocks []litellm.Block) ([]chatMessage, error) {
 		if err != nil {
 			return nil, err
 		}
+		var content any = text
+		if result.Cache != nil {
+			breakpoint, err := convertPromptCacheBreakpoint(result.Cache)
+			if err != nil {
+				return nil, err
+			}
+			content = []contentPart{{Type: "text", Text: text, PromptCacheBreakpoint: breakpoint}}
+		}
 		out = append(out, chatMessage{
 			Role:       string(litellm.RoleTool),
 			ToolCallID: result.ToolUseID,
-			Content:    text,
+			Content:    content,
 		})
 	}
 	return out, nil
+}
+
+func convertPromptCacheBreakpoint(cache *litellm.CacheControl) (*promptCacheBreakpoint, error) {
+	if cache == nil {
+		return nil, nil
+	}
+	if cache.Type != "" && cache.Type != litellm.CacheTypeEphemeral {
+		return nil, fmt.Errorf("openai: cache breakpoint type must be %q", litellm.CacheTypeEphemeral)
+	}
+	if cache.TTL != "" {
+		return nil, fmt.Errorf("openai: cache breakpoint TTL must be set with prompt_cache_options.ttl")
+	}
+	return &promptCacheBreakpoint{Mode: "explicit"}, nil
 }
 
 func toolResultText(blocks []litellm.Block) (string, error) {
@@ -214,6 +270,9 @@ func toolResultText(blocks []litellm.Block) (string, error) {
 	for _, block := range blocks {
 		switch b := block.(type) {
 		case litellm.TextBlock:
+			if b.Cache != nil {
+				return "", fmt.Errorf("OpenAI Chat tool result content cache must be set on ToolResultBlock")
+			}
 			if text.Len() > 0 {
 				text.WriteString("\n")
 			}

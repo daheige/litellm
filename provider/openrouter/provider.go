@@ -3,6 +3,7 @@ package openrouter
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/voocel/litellm"
@@ -17,6 +18,7 @@ const (
 	ProviderOptionCacheRetention = "cache_retention"
 	ProviderOptionSessionID      = "session_id"
 	ProviderOptionRouting        = "provider"
+	structuredOutputsBeta        = "structured-outputs-2025-11-13"
 )
 
 func New(cfg Config) (*compat.Provider, error) {
@@ -31,6 +33,7 @@ func New(cfg Config) (*compat.Provider, error) {
 				"HTTP-Referer": "https://github.com/voocel/litellm",
 				"X-Title":      "litellm",
 			},
+			Request: mapHeaders,
 		},
 		Request: compat.RequestSpec{
 			SupportsJSONSchema: true,
@@ -53,18 +56,48 @@ func New(cfg Config) (*compat.Provider, error) {
 		Stream: compat.StreamSpec{
 			ReasoningFields: []string{"reasoning_details", "reasoning", "reasoning_content"},
 		},
+		Features: compat.FeatureSpec{StrictTools: compat.StrictToolsForward},
 		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Tools.StrictSchema = litellm.SupportPartial
+			caps.Thinking.Supported = litellm.SupportPartial
+			caps.Thinking.Disable = litellm.SupportPartial
 			caps.Thinking.Efforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
-			caps.Thinking.BudgetTokens = litellm.SupportYes
+			caps.Thinking.BudgetTokens = litellm.SupportPartial
 			caps.Thinking.IncludeOutput = litellm.SupportNo
 			caps.Cache.Block = litellm.SupportYes
 			caps.Cache.Retention = litellm.SupportYes
 			caps.Usage.CacheWriteTokens = litellm.SupportYes
-			caps.Structured.JSONSchema = litellm.SupportYes
-			caps.Structured.Strict = litellm.SupportYes
+			caps.Structured.JSONSchema = litellm.SupportPartial
+			caps.Structured.Strict = litellm.SupportPartial
 			return caps
 		},
 	})
+}
+
+func mapHeaders(headers http.Header, req *litellm.Request) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Model)), "anthropic/") {
+		return
+	}
+	for _, tool := range req.Tools {
+		if tool.Strict == litellm.StrictEnabled {
+			appendHeaderValue(headers, "x-anthropic-beta", structuredOutputsBeta)
+			return
+		}
+	}
+}
+
+func appendHeaderValue(headers http.Header, name, value string) {
+	current := headers.Get(name)
+	for item := range strings.SplitSeq(current, ",") {
+		if strings.TrimSpace(item) == value {
+			return
+		}
+	}
+	if current == "" {
+		headers.Set(name, value)
+		return
+	}
+	headers.Set(name, current+","+value)
 }
 
 func Factory(cfg Config) (litellm.Provider, error) {
@@ -343,7 +376,7 @@ func textOnly(blocks []litellm.Block) (string, error) {
 	return text.String(), nil
 }
 
-func cleanStrictSchema(schema litellm.Schema) (any, error) {
+func cleanStrictSchema(schema litellm.Schema, strict litellm.StrictMode) (any, error) {
 	var decoded any
 	if len(schema) == 0 {
 		return map[string]any{"type": "object"}, nil
@@ -351,7 +384,10 @@ func cleanStrictSchema(schema litellm.Schema) (any, error) {
 	if err := json.Unmarshal(schema, &decoded); err != nil {
 		return nil, err
 	}
-	return addAdditionalPropertiesFalse(decoded), nil
+	if strict == litellm.StrictEnabled {
+		return addAdditionalPropertiesFalse(decoded), nil
+	}
+	return decoded, nil
 }
 
 func addAdditionalPropertiesFalse(schema any) any {

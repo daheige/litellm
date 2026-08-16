@@ -39,10 +39,10 @@ func compatWrappers() []wrapperCase {
 		{name: "deepseek", apiKey: true, capabilityModel: "deepseek-reasoner", new: deepseek.New},
 		{name: "qwen", apiKey: true, capabilityModel: "qwen3-max", new: qwen.New},
 		{name: "glm", apiKey: true, capabilityModel: "glm-5.2", new: glm.New},
-		{name: "openrouter", apiKey: true, capabilityModel: "anthropic/claude-sonnet-4", new: openrouter.New},
+		{name: "openrouter", apiKey: true, capabilityModel: "anthropic/claude-sonnet-4", strictToolsForward: true, new: openrouter.New},
 		{name: "minimax", apiKey: true, capabilityModel: "MiniMax-M3", new: minimax.New},
 		{name: "ollama", capabilityModel: "qwen3", new: ollama.New},
-		{name: "grok", apiKey: true, capabilityModel: "grok-4.3", new: grok.New},
+		{name: "grok", apiKey: true, capabilityModel: "grok-4.3", strictToolsForward: true, new: grok.New},
 		{name: "mimo", apiKey: true, capabilityModel: "mimo-v2.5-pro", strictToolsForward: true, new: mimo.New},
 	}
 }

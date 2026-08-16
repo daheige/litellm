@@ -34,7 +34,7 @@ func main() {
 	}
 
 	resp, err := client.Chat(context.Background(), litellm.Request{
-		Model: "gpt-5.4-mini",
+		Model: "gpt-5.6",
 		Messages: []litellm.Message{
 			litellm.System("You are concise."),
 			litellm.UserText("Explain Go interfaces in one sentence."),
@@ -68,7 +68,7 @@ msgs := []litellm.Message{
 	litellm.User(litellm.Text("What is in this image?"), litellm.ImageURL("https://example.com/cat.png")),
 }
 
-resp, err := client.Chat(ctx, litellm.Request{Model: "gpt-5.4-mini", Messages: msgs})
+resp, err := client.Chat(ctx, litellm.Request{Model: "gpt-5.6", Messages: msgs})
 _ = resp
 _ = err
 ```
@@ -117,7 +117,7 @@ client, err := openai.NewClient(openai.Config{APIKey: os.Getenv("OPENAI_API_KEY"
 
 ```go
 stream, err := client.Stream(ctx, litellm.Request{
-	Model:    "gpt-5.4-mini",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("Tell me a short joke.")},
 })
 if err != nil {
@@ -192,7 +192,7 @@ if err != nil {
 tool.Strict = litellm.StrictEnabled
 
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:      "gpt-5.4-mini",
+	Model:      "gpt-5.6",
 	Messages:   []litellm.Message{litellm.UserText("Weather in Paris?")},
 	Tools:      []litellm.Tool{tool},
 	ToolChoice: "auto",
@@ -214,7 +214,7 @@ if err != nil {
 }
 
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:          "gpt-5.4-mini",
+	Model:          "gpt-5.6",
 	Messages:       []litellm.Message{litellm.UserText("Generate a person.")},
 	ResponseFormat: format,
 })
@@ -226,7 +226,7 @@ Thinking is explicit. If `Thinking` is nil, the SDK sends no thinking control fi
 
 ```go
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:    "claude-sonnet-4-5-20250929",
+	Model:    "claude-sonnet-5",
 	Messages: []litellm.Message{litellm.UserText("Explain the tradeoffs.")},
 	MaxTokens: litellm.IntPtr(2048),
 	Thinking: &litellm.Thinking{
@@ -236,9 +236,9 @@ resp, err := client.Chat(ctx, litellm.Request{
 })
 ```
 
-Provider constraints are validated locally. For example, on Claude models before 4.6 Anthropic thinking requires `max_tokens >= 1024`, a budget or effort, and no conflicting explicit temperature; Claude 4.6 and later use adaptive thinking and map effort to `output_config.effort`.
-Portable effort values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; providers that require token budgets map these values to `budget_tokens`.
-Use `client.Capabilities(model)` or `litellm.GetCapabilities(provider, model)` for UI/preflight checks across providers.
+Stable provider constraints are validated locally. Model-specific effort and disable limits are left to the provider API, so new models in the same API generation work without SDK updates.
+Portable effort values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, but support is model-specific.
+Use `client.Capabilities(model)` or `litellm.GetCapabilities(provider, model)` for the stable UI/preflight baseline. Model-specific values outside that baseline can still be sent and are validated by the provider API.
 
 ## OpenAI Responses
 
@@ -251,12 +251,14 @@ if err != nil {
 }
 
 resp, err := oai.Responses(ctx, &openai.ResponsesRequest{
-	Model: "gpt-5.5",
+	Model: "gpt-5.6",
 	Messages: []litellm.Message{
 		litellm.UserText("Solve 15*8 step by step."),
 	},
 	ReasoningEffort:  "medium",
 	ReasoningSummary: "auto",
+	ReasoningMode:    "pro",
+	ReasoningContext: "all_turns",
 	MaxOutputTokens:  litellm.IntPtr(800),
 	OpenAITools: []openai.ResponsesTool{
 		{"type": "web_search_preview"},
@@ -273,7 +275,7 @@ oai, err := openai.New(openai.Config{
 })
 
 stream, err := oai.ResponsesStream(ctx, &openai.ResponsesRequest{
-	Model:    "gpt-5.5",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("Search and summarize.")},
 })
 ```
@@ -332,10 +334,10 @@ Provider-specific request options go in `Request.ProviderOptions`. Unknown keys 
 
 ```go
 resp, err := client.Chat(ctx, litellm.Request{
-	Model:    "gpt-5.4-mini",
+	Model:    "gpt-5.6",
 	Messages: []litellm.Message{litellm.UserText("Hello")},
 	ProviderOptions: litellm.ProviderOptions{
-		openai.ProviderOptionPromptCacheRetention: "24h",
+		openai.ProviderOptionPromptCacheOptions: openai.PromptCacheOptions{Mode: "implicit", TTL: "30m"},
 	},
 })
 ```

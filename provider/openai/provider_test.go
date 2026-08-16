@@ -89,6 +89,20 @@ func TestBuildRequestTextImageToolsAndOptions(t *testing.T) {
 	}
 }
 
+func TestStrictSchemaRejectsConst(t *testing.T) {
+	_, err := normalizeStrictSchema(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"kind": map[string]any{"type": "string", "const": "answer"},
+		},
+		"required": []any{"kind"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "const is not supported") {
+		t.Fatalf("expected const schema error, got %v", err)
+	}
+}
+
 func TestBuildRequestOpenAIProviderOptions(t *testing.T) {
 	provider := mustProvider(t)
 	wire, err := provider.buildRequest(&litellm.Request{
@@ -268,13 +282,13 @@ func TestBuildRequestReasoningModelConstraints(t *testing.T) {
 	}
 
 	temp := 1.0
-	_, err = provider.buildRequest(&litellm.Request{
+	wire, err := provider.buildRequest(&litellm.Request{
 		Model:       "gpt-5.1",
 		Temperature: &temp,
 		Messages:    []litellm.Message{litellm.UserText("hi")},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), "temperature is not supported") {
-		t.Fatalf("expected temperature error, got %v", err)
+	if err != nil || wire.Temperature == nil || *wire.Temperature != temp {
+		t.Fatalf("temperature was not preserved: wire=%#v err=%v", wire, err)
 	}
 
 	_, err = provider.buildRequest(&litellm.Request{
@@ -286,7 +300,7 @@ func TestBuildRequestReasoningModelConstraints(t *testing.T) {
 		t.Fatalf("expected minimal effort error, got %v", err)
 	}
 
-	wire, err := provider.buildRequest(&litellm.Request{
+	wire, err = provider.buildRequest(&litellm.Request{
 		Model:    "openai/gpt-5.1",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{
@@ -315,7 +329,7 @@ func TestBuildRequestReasoningModelConstraints(t *testing.T) {
 
 	topP := 0.9
 	wire, err = provider.buildRequest(&litellm.Request{
-		Model:    "gpt-5.1",
+		Model:    "gpt-5.6",
 		TopP:     &topP,
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{
@@ -326,8 +340,90 @@ func TestBuildRequestReasoningModelConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRequest xhigh reasoning model: %v", err)
 	}
-	if wire.ReasoningEffort != "xhigh" || wire.TopP != nil {
+	if wire.ReasoningEffort != "xhigh" || wire.TopP == nil || *wire.TopP != topP {
 		t.Fatalf("reasoning_effort/top_p = %q/%v", wire.ReasoningEffort, wire.TopP)
+	}
+
+	wire, err = provider.buildRequest(&litellm.Request{
+		Model:    "gpt-5.7",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingDisabled},
+	}, false)
+	if err != nil || wire.ReasoningEffort != "none" {
+		t.Fatalf("future model disabled reasoning = %#v, err %v", wire, err)
+	}
+
+	wire, err = provider.buildRequest(&litellm.Request{
+		Model:          "gpt-5.7",
+		Messages:       []litellm.Message{litellm.UserText("hi")},
+		ResponseFormat: &litellm.ResponseFormat{Type: litellm.ResponseFormatJSONObject},
+	}, false)
+	if err != nil || wire.ResponseFormat == nil {
+		t.Fatalf("future model structured output = %#v, err %v", wire, err)
+	}
+
+	if _, err = provider.buildRequest(&litellm.Request{
+		Model:    "gpt-5.7",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+	}, true); err != nil {
+		t.Fatalf("future model streaming: %v", err)
+	}
+}
+
+func TestBuildRequestMapsPromptCacheOptions(t *testing.T) {
+	provider := mustProvider(t)
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model:    "gpt-5.6",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		ProviderOptions: litellm.ProviderOptions{
+			ProviderOptionPromptCacheOptions: map[string]any{"mode": "explicit", "ttl": "30m"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if wire.PromptCacheOptions == nil || wire.PromptCacheOptions.Mode != "explicit" || wire.PromptCacheOptions.TTL != "30m" {
+		t.Fatalf("prompt_cache_options = %#v", wire.PromptCacheOptions)
+	}
+
+	wire, err = provider.buildRequest(&litellm.Request{
+		Model:    "gpt-5.7",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		ProviderOptions: litellm.ProviderOptions{
+			ProviderOptionPromptCacheOptions: map[string]any{"mode": "implicit"},
+		},
+	}, false)
+	if err != nil || wire.PromptCacheOptions == nil || wire.PromptCacheOptions.Mode != "implicit" {
+		t.Fatalf("future model prompt_cache_options = %#v, err %v", wire.PromptCacheOptions, err)
+	}
+}
+
+func TestBuildRequestMapsPromptCacheBreakpoint(t *testing.T) {
+	provider := mustProvider(t)
+	wire, err := provider.buildRequest(&litellm.Request{
+		Model: "gpt-5.6",
+		Messages: []litellm.Message{litellm.User(litellm.TextBlock{
+			Text:  "stable prefix",
+			Cache: &litellm.CacheControl{Type: litellm.CacheTypeEphemeral},
+		})},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	parts, ok := wire.Messages[0].Content.([]contentPart)
+	if !ok || len(parts) != 1 || parts[0].PromptCacheBreakpoint == nil || parts[0].PromptCacheBreakpoint.Mode != "explicit" {
+		t.Fatalf("content = %#v", wire.Messages[0].Content)
+	}
+
+	_, err = provider.buildRequest(&litellm.Request{
+		Model: "gpt-5.6",
+		Messages: []litellm.Message{litellm.User(litellm.TextBlock{
+			Text:  "stable prefix",
+			Cache: &litellm.CacheControl{Type: litellm.CacheTypeEphemeral, TTL: litellm.CacheTTL5m},
+		})},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "prompt_cache_options.ttl") {
+		t.Fatalf("expected cache TTL error, got %v", err)
 	}
 }
 
@@ -483,7 +579,7 @@ func TestChatConvertsResponseBlocks(t *testing.T) {
 					"prompt_tokens":10,
 					"completion_tokens":5,
 					"total_tokens":15,
-					"prompt_tokens_details":{"cached_tokens":3},
+					"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4},
 					"completion_tokens_details":{"reasoning_tokens":2}
 				}
 			}`), nil
@@ -512,7 +608,7 @@ func TestChatConvertsResponseBlocks(t *testing.T) {
 	if resp.FinishReason != litellm.FinishReasonToolCall {
 		t.Fatalf("finish reason = %q", resp.FinishReason)
 	}
-	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 5 || resp.Usage.CacheReadTokens != 3 || resp.Usage.ReasoningTokens != 2 {
+	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 5 || resp.Usage.CacheReadTokens != 3 || resp.Usage.CacheWriteTokens != 4 || resp.Usage.ReasoningTokens != 2 {
 		t.Fatalf("usage = %+v", resp.Usage)
 	}
 }

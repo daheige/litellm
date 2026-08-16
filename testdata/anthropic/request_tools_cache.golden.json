@@ -61,12 +61,14 @@
       "role": "assistant"
     }
   ],
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-5",
+  "output_config": {
+    "effort": "low"
+  },
   "system": "You are helpful.",
   "temperature": 1,
   "thinking": {
-    "budget_tokens": 2048,
-    "type": "enabled"
+    "type": "adaptive"
   },
   "tools": [
     {

@@ -51,18 +51,12 @@ func New(cfg Config) (*compat.Provider, error) {
 		Stream: compat.StreamSpec{
 			ReasoningFields: []string{"reasoning_content"},
 		},
-		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
+		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Tools.Choice = litellm.SupportPartial
 			caps.Thinking.Efforts = litellm.PortableThinkingEfforts()
 			caps.Thinking.BudgetTokens = litellm.SupportNo
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"thinking requires glm-4.5+; reasoning_effort requires glm-5.2+"}
-			if !versionAtLeast(model, 4, 5) {
-				caps.Thinking.Supported = litellm.SupportNo
-				caps.Thinking.Disable = litellm.SupportNo
-				caps.Thinking.Efforts = nil
-			} else if !versionAtLeast(model, 5, 2) {
-				caps.Thinking.Efforts = nil
-			}
+			caps.Thinking.Notes = []string{"model-specific thinking limits are enforced by the GLM API"}
 			caps.Structured.JSONSchema = litellm.SupportNo
 			caps.Structured.PromptOnly = true
 			return caps
@@ -85,12 +79,9 @@ func mapResponseFormat(format *litellm.ResponseFormat) (any, error) {
 	}
 }
 
-func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, error) {
+func mapThinking(thinking *litellm.Thinking, _ string) (map[string]any, error) {
 	if thinking == nil || thinking.Mode == litellm.ThinkingUnspecified {
 		return nil, nil
-	}
-	if !versionAtLeast(model, 4, 5) {
-		return nil, fmt.Errorf("glm: thinking is only supported for glm-4.5 or later")
 	}
 	switch thinking.Mode {
 	case litellm.ThinkingDisabled:
@@ -102,9 +93,6 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 			return nil, err
 		}
 		if effort != "" {
-			if !versionAtLeast(model, 5, 2) {
-				return nil, fmt.Errorf("glm: reasoning_effort is only supported for glm-5.2 or later")
-			}
 			body["reasoning_effort"] = effort
 		}
 		return body, nil
@@ -113,7 +101,10 @@ func mapThinking(thinking *litellm.Thinking, model string) (map[string]any, erro
 	}
 }
 
-func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, _ *litellm.Request) error {
+func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, req *litellm.Request) error {
+	if err := validateToolChoice(req.ToolChoice); err != nil {
+		return err
+	}
 	for key, value := range options {
 		switch key {
 		case ProviderOptionDoSample, ProviderOptionToolStream:
@@ -135,6 +126,17 @@ func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, _ 
 		default:
 			return fmt.Errorf("glm: unsupported provider option %q", key)
 		}
+	}
+	return nil
+}
+
+func validateToolChoice(choice litellm.ToolChoice) error {
+	if choice == nil {
+		return nil
+	}
+	value, ok := choice.(string)
+	if !ok || strings.ToLower(strings.TrimSpace(value)) != "auto" {
+		return fmt.Errorf(`glm: tool_choice only supports "auto"`)
 	}
 	return nil
 }
@@ -202,14 +204,4 @@ func reasoningEffort(thinking *litellm.Thinking) (string, error) {
 	default:
 		return "", fmt.Errorf("glm: unsupported reasoning_effort %q; use max, xhigh, high, medium, low, minimal, or none", effort)
 	}
-}
-
-func versionAtLeast(model string, major, minor int) bool {
-	_, after, ok := strings.Cut(strings.ToLower(model), "glm-")
-	if !ok {
-		return false
-	}
-	var maj, min int
-	fmt.Sscanf(after, "%d.%d", &maj, &min)
-	return maj > major || (maj == major && min >= minor)
 }

@@ -71,7 +71,7 @@ func TestBuildRequestToolRoundTripPreservesSignatureAndName(t *testing.T) {
 				"required": []string{"city"},
 			}),
 		},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "low"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "low", IncludeOutput: true},
 	}
 	wire, err := provider.buildRequest(req)
 	if err != nil {
@@ -164,29 +164,23 @@ func TestBuildRequestRoundTripsResponseBlocksWithSignatures(t *testing.T) {
 	}
 }
 
-func TestBuildRequestGemini25UsesThinkingBudget(t *testing.T) {
+func TestBuildRequestRejectsThinkingBudget(t *testing.T) {
 	provider := mustProvider(t)
-	wire, err := provider.buildRequest(&litellm.Request{
-		Model:    "gemini-2.5-flash",
+	budget := 8192
+	_, err := provider.buildRequest(&litellm.Request{
+		Model:    "gemini-3.7-flash",
 		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "medium"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &budget},
 	})
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
-	}
-	tc := wire.GenerationConfig.ThinkingConfig
-	if tc == nil || tc.ThinkingBudget == nil || *tc.ThinkingBudget != 8192 {
-		t.Fatalf("thinking config = %+v, want budget 8192", tc)
-	}
-	if tc.ThinkingLevel != "" {
-		t.Fatalf("thinking effort = %q, want empty", tc.ThinkingLevel)
+	if err == nil || !strings.Contains(err.Error(), "budget_tokens is not supported") {
+		t.Fatalf("expected unsupported budget error, got %v", err)
 	}
 }
 
-func TestBuildRequestGemini3UsesEffortThinkingLevel(t *testing.T) {
+func TestBuildRequestGemini3AndLaterUseThinkingLevel(t *testing.T) {
 	provider := mustProvider(t)
 	wire, err := provider.buildRequest(&litellm.Request{
-		Model:    "gemini-3-pro",
+		Model:    "gemini-4-flash",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
 	})
@@ -199,19 +193,38 @@ func TestBuildRequestGemini3UsesEffortThinkingLevel(t *testing.T) {
 	}
 }
 
-func TestBuildRequestGemini25UsesEffortBudget(t *testing.T) {
+func TestThinkingCapabilitiesFollowAPIGeneration(t *testing.T) {
 	provider := mustProvider(t)
-	wire, err := provider.buildRequest(&litellm.Request{
+	caps := provider.Capabilities("models/gemini-4-flash")
+	if caps.Thinking.Supported != litellm.SupportYes || caps.Thinking.Disable != litellm.SupportNo || !caps.Thinking.SupportsEffort("high") || caps.Thinking.SupportsEffort("minimal") || caps.Thinking.SupportsEffort("medium") {
+		t.Fatalf("future Gemini capabilities = %+v", caps.Thinking)
+	}
+	if legacy := provider.Capabilities("gemini-2.5-flash").Thinking; legacy.Supported != litellm.SupportUnknown {
+		t.Fatalf("legacy Gemini capabilities = %+v", legacy)
+	}
+}
+
+func TestBuildRequestRejectsLegacyThinkingModel(t *testing.T) {
+	provider := mustProvider(t)
+	_, err := provider.buildRequest(&litellm.Request{
 		Model:    "gemini-2.5-flash",
 		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
 	})
-	if err != nil {
-		t.Fatalf("buildRequest returned error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "thinking is not supported") {
+		t.Fatalf("expected unsupported model error, got %v", err)
 	}
-	tc := wire.GenerationConfig.ThinkingConfig
-	if tc == nil || tc.ThinkingBudget == nil || *tc.ThinkingBudget != 32768 {
-		t.Fatalf("thinking config = %+v, want budget 32768", tc)
+}
+
+func TestBuildRequestRejectsDisabledThinking(t *testing.T) {
+	provider := mustProvider(t)
+	_, err := provider.buildRequest(&litellm.Request{
+		Model:    "gemini-3.6-flash",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingDisabled},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be disabled") {
+		t.Fatalf("expected disable error, got %v", err)
 	}
 }
 

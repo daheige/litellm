@@ -15,6 +15,7 @@ const (
 	ProviderOptionModeration           = "moderation"
 	ProviderOptionStreamOptions        = "stream_options"
 	ProviderOptionPromptCacheKey       = "prompt_cache_key"
+	ProviderOptionPromptCacheOptions   = "prompt_cache_options"
 	ProviderOptionPromptCacheRetention = "prompt_cache_retention"
 	ProviderOptionPrediction           = "prediction"
 	ProviderOptionMetadata             = "metadata"
@@ -40,6 +41,7 @@ var providerOptionKeys = map[string]struct{}{
 	ProviderOptionModeration:           {},
 	ProviderOptionStreamOptions:        {},
 	ProviderOptionPromptCacheKey:       {},
+	ProviderOptionPromptCacheOptions:   {},
 	ProviderOptionPromptCacheRetention: {},
 	ProviderOptionPrediction:           {},
 	ProviderOptionMetadata:             {},
@@ -124,6 +126,12 @@ func applyProviderOptions(req *chatRequest, options map[string]any) error {
 				return err
 			}
 			req.PromptCacheKey = v
+		case ProviderOptionPromptCacheOptions:
+			v, err := optionPromptCacheOptions(key, value)
+			if err != nil {
+				return err
+			}
+			req.PromptCacheOptions = v
 		case ProviderOptionPromptCacheRetention:
 			v, err := optionString(key, value)
 			if err != nil {
@@ -203,6 +211,58 @@ func validatePromptCacheRetention(value string) error {
 	default:
 		return fmt.Errorf("openai: prompt_cache_retention must be one of in_memory, 24h, got %q", value)
 	}
+}
+
+type PromptCacheOptions struct {
+	Mode string `json:"mode,omitempty"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
+func optionPromptCacheOptions(key string, value any) (*PromptCacheOptions, error) {
+	var out PromptCacheOptions
+	switch value := value.(type) {
+	case PromptCacheOptions:
+		out = value
+	case *PromptCacheOptions:
+		if value == nil {
+			return nil, fmt.Errorf("openai: provider option %q cannot be nil", key)
+		}
+		out = *value
+	case map[string]any:
+		for field, raw := range value {
+			stringValue, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("openai: provider option %q.%s must be string", key, field)
+			}
+			switch field {
+			case "mode":
+				out.Mode = stringValue
+			case "ttl":
+				out.TTL = stringValue
+			default:
+				return nil, fmt.Errorf("openai: unsupported %s field %q", key, field)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("openai: provider option %q must be object", key)
+	}
+	if err := validatePromptCacheOptions(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validatePromptCacheOptions(options *PromptCacheOptions) error {
+	if options == nil {
+		return nil
+	}
+	if err := validateOneOf("prompt_cache_options.mode", options.Mode, "implicit", "explicit"); err != nil {
+		return fmt.Errorf("openai: %w", err)
+	}
+	if err := validateOneOf("prompt_cache_options.ttl", options.TTL, "30m"); err != nil {
+		return fmt.Errorf("openai: %w", err)
+	}
+	return nil
 }
 
 func optionString(key string, value any) (string, error) {

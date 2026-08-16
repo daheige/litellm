@@ -23,7 +23,7 @@ func TestResponsesBuildRequestMapsCoreFields(t *testing.T) {
 	background := false
 
 	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
-		Model: "gpt-5.1",
+		Model: "gpt-5.6",
 		Messages: []litellm.Message{
 			litellm.System("Follow the contract."),
 			litellm.UserText("Search and summarize."),
@@ -41,7 +41,10 @@ func TestResponsesBuildRequestMapsCoreFields(t *testing.T) {
 		ParallelToolCalls:    &parallelToolCalls,
 		ReasoningEffort:      "xhigh",
 		ReasoningSummary:     "auto",
+		ReasoningMode:        "pro",
+		ReasoningContext:     "all_turns",
 		PromptCacheKey:       "workflow-v1",
+		PromptCacheOptions:   &PromptCacheOptions{Mode: "explicit", TTL: "30m"},
 		PromptCacheRetention: "24h",
 		Metadata:             map[string]string{"tenant": "acme"},
 		SafetyIdentifier:     "user-123",
@@ -72,8 +75,11 @@ func TestResponsesBuildRequestMapsCoreFields(t *testing.T) {
 	if wire.Text == nil || wire.Text.Verbosity != "low" {
 		t.Fatalf("text = %#v", wire.Text)
 	}
-	if wire.Reasoning == nil || wire.Reasoning.Effort != "xhigh" || wire.Reasoning.Summary != "auto" {
+	if wire.Reasoning == nil || wire.Reasoning.Effort != "xhigh" || wire.Reasoning.Summary != "auto" || wire.Reasoning.Mode != "pro" || wire.Reasoning.Context != "all_turns" {
 		t.Fatalf("reasoning = %#v", wire.Reasoning)
+	}
+	if wire.PromptCacheOptions == nil || wire.PromptCacheOptions.Mode != "explicit" || wire.PromptCacheOptions.TTL != "30m" {
+		t.Fatalf("prompt_cache_options = %#v", wire.PromptCacheOptions)
 	}
 	tools, err := json.Marshal(wire.Tools)
 	if err != nil {
@@ -186,8 +192,85 @@ func TestResponsesRejectsMinimalReasoningEffort(t *testing.T) {
 		Messages:        []litellm.Message{litellm.UserText("hello")},
 		ReasoningEffort: "minimal",
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), `reasoning_effort must be one of none, low, medium, high, xhigh`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported reasoning_effort "minimal"`) {
 		t.Fatalf("expected minimal reasoning_effort error, got %v", err)
+	}
+}
+
+func TestResponsesLeavesModelSpecificConstraintsToAPI(t *testing.T) {
+	provider := mustProvider(t)
+	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
+		Model:           "gpt-5.7",
+		Input:           "hi",
+		ReasoningEffort: "none",
+	}, false)
+	if err != nil || wire.Reasoning == nil || wire.Reasoning.Effort != "none" {
+		t.Fatalf("future model reasoning = %#v, err %v", wire.Reasoning, err)
+	}
+
+	wire, err = provider.buildResponsesRequest(&ResponsesRequest{
+		Model:          "gpt-5.7",
+		Input:          "hi",
+		ResponseFormat: &litellm.ResponseFormat{Type: litellm.ResponseFormatJSONObject},
+	}, false)
+	if err != nil || wire.Text == nil || wire.Text.Format == nil {
+		t.Fatalf("future model structured output = %#v, err %v", wire.Text, err)
+	}
+
+	if _, err = provider.buildResponsesRequest(&ResponsesRequest{Model: "gpt-5.7", Input: "hi"}, true); err != nil {
+		t.Fatalf("future model streaming: %v", err)
+	}
+}
+
+func TestResponsesReasoningContextAndMode(t *testing.T) {
+	provider := mustProvider(t)
+	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
+		Model:            "gpt-5.6",
+		Messages:         []litellm.Message{litellm.UserText("hello")},
+		ReasoningContext: "current_turn",
+	}, false)
+	if err != nil {
+		t.Fatalf("buildResponsesRequest context: %v", err)
+	}
+	if wire.Reasoning == nil || wire.Reasoning.Context != "current_turn" {
+		t.Fatalf("reasoning = %#v", wire.Reasoning)
+	}
+
+	wire, err = provider.buildResponsesRequest(&ResponsesRequest{
+		Model:         "gpt-5.6",
+		Messages:      []litellm.Message{litellm.UserText("hello")},
+		ReasoningMode: "pro",
+	}, false)
+	if err != nil || wire.Reasoning == nil || wire.Reasoning.Mode != "pro" {
+		t.Fatalf("reasoning mode = %#v, err %v", wire.Reasoning, err)
+	}
+}
+
+func TestResponsesMapsPromptCacheBreakpoint(t *testing.T) {
+	provider := mustProvider(t)
+	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
+		Model: "gpt-5.6",
+		Messages: []litellm.Message{
+			{
+				Role: litellm.RoleSystem,
+				Blocks: []litellm.Block{litellm.TextBlock{
+					Text:  "stable developer instructions",
+					Cache: &litellm.CacheControl{Type: litellm.CacheTypeEphemeral},
+				}},
+			},
+			litellm.UserText("hello"),
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildResponsesRequest: %v", err)
+	}
+	data, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	jsonText := string(data)
+	if wire.Instructions != "" || !strings.Contains(jsonText, `"role":"developer"`) || !strings.Contains(jsonText, `"prompt_cache_breakpoint":{"mode":"explicit"}`) {
+		t.Fatalf("wire = %s", data)
 	}
 }
 
@@ -628,23 +711,26 @@ func TestResponsesAPIRejectsMinimalThinkingEffort(t *testing.T) {
 		Messages: []litellm.Message{litellm.UserText("hello")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "minimal"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "reasoning_effort must be one of none, low, medium, high, xhigh") || !litellm.IsValidationError(err) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported reasoning_effort "minimal"`) || !litellm.IsValidationError(err) {
 		t.Fatalf("expected minimal reasoning_effort validation error, got %v", err)
 	}
 }
 
-func TestResponsesThinkingRequiresExplicitMapping(t *testing.T) {
+func TestResponsesThinkingUsesDefaultEffort(t *testing.T) {
 	provider := mustProvider(t)
-	_, err := provider.buildResponsesRequest(&ResponsesRequest{
+	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
 		Model:    "gpt-5.1",
 		Messages: []litellm.Message{litellm.UserText("hello")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	}, false)
-	if err == nil || !strings.Contains(err.Error(), "thinking effort, summary, or include_output is required") {
-		t.Fatalf("expected thinking mapping error, got %v", err)
+	if err != nil {
+		t.Fatalf("buildResponsesRequest: %v", err)
+	}
+	if wire.Reasoning == nil || wire.Reasoning.Effort != "medium" {
+		t.Fatalf("reasoning = %#v", wire.Reasoning)
 	}
 
-	wire, err := provider.buildResponsesRequest(&ResponsesRequest{
+	wire, err = provider.buildResponsesRequest(&ResponsesRequest{
 		Model:    "gpt-5.1",
 		Messages: []litellm.Message{litellm.UserText("hello")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, IncludeOutput: true},
@@ -670,7 +756,7 @@ func TestResponsesConvertsOutputBlocks(t *testing.T) {
 			InputTokens:         3,
 			OutputTokens:        4,
 			TotalTokens:         7,
-			InputTokensDetails:  &responsesInputTokensDetails{CachedTokens: 2},
+			InputTokensDetails:  &responsesInputTokensDetails{CachedTokens: 2, CacheWriteTokens: 5},
 			OutputTokensDetails: &responsesOutputTokensDetails{ReasoningTokens: 1},
 		},
 	}, "")
@@ -687,7 +773,7 @@ func TestResponsesConvertsOutputBlocks(t *testing.T) {
 	if resp.FinishReason != litellm.FinishReasonToolCall {
 		t.Fatalf("finish = %q", resp.FinishReason)
 	}
-	if resp.Usage.InputTokens != 3 || resp.Usage.OutputTokens != 4 || resp.Usage.CacheReadTokens != 2 || resp.Usage.ReasoningTokens != 1 {
+	if resp.Usage.InputTokens != 3 || resp.Usage.OutputTokens != 4 || resp.Usage.CacheReadTokens != 2 || resp.Usage.CacheWriteTokens != 5 || resp.Usage.ReasoningTokens != 1 {
 		t.Fatalf("usage = %+v", resp.Usage)
 	}
 }
@@ -937,7 +1023,7 @@ func TestResponsesStreamCollectsTypedEvents(t *testing.T) {
 	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "lookup" || string(calls[0].Arguments) != `{"q":"x"}` {
 		t.Fatalf("tool calls = %+v", calls)
 	}
-	if resp.Usage.InputTokens != 2 || resp.Usage.OutputTokens != 3 || resp.Usage.ReasoningTokens != 1 {
+	if resp.Usage.InputTokens != 2 || resp.Usage.OutputTokens != 3 || resp.Usage.CacheReadTokens != 1 || resp.Usage.CacheWriteTokens != 2 || resp.Usage.ReasoningTokens != 1 {
 		t.Fatalf("usage = %+v", resp.Usage)
 	}
 	if resp.FinishReason != litellm.FinishReasonStop {

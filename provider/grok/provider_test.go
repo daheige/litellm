@@ -42,33 +42,68 @@ func TestThinkingDisabled(t *testing.T) {
 	}
 }
 
-func TestReasoningEffortRejectsUnsupportedModel(t *testing.T) {
-	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://grok.test", HTTPClient: roundTripFunc(nil)})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, err = p.Chat(context.Background(), &litellm.Request{
-		Model:    "grok-4",
+func TestGrok45Reasoning(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:    "grok-4.5-latest",
 		Messages: []litellm.Message{litellm.UserText("hi")},
-		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "high"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "medium"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "grok-4.3") {
-		t.Fatalf("expected model support error, got %v", err)
+	if body["reasoning_effort"] != "medium" {
+		t.Fatalf("body = %#v", body)
+	}
+
+	disabled := captureBody(t, &litellm.Request{
+		Model:    "grok-4.5",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingDisabled},
+	})
+	if disabled["reasoning_effort"] != "none" {
+		t.Fatalf("reasoning_effort = %#v, want none", disabled["reasoning_effort"])
 	}
 }
 
-func TestThinkingRequiresEffort(t *testing.T) {
-	p, err := New(compat.Config{APIKey: "key", BaseURL: "https://grok.test", HTTPClient: roundTripFunc(nil)})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+func TestToolsAreAlwaysStrict(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:    "grok-4.5",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Tools:    []litellm.Tool{mustTool(t, "lookup", litellm.StrictEnabled)},
+	})
+	fn := body["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if _, ok := fn["strict"]; ok {
+		t.Fatalf("xAI enforces strict tool schemas without a strict field: %#v", fn)
 	}
-	_, err = p.Chat(context.Background(), &litellm.Request{
+}
+
+func TestReasoningEffortPassesThroughForNewModels(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:    "grok-next",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
+	})
+	if body["reasoning_effort"] != "xhigh" {
+		t.Fatalf("reasoning_effort = %#v, want xhigh", body["reasoning_effort"])
+	}
+}
+
+func TestThinkingUsesDefaultEffort(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
 		Model:    "grok-4.3",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	})
-	if err == nil || !strings.Contains(err.Error(), "effort is required") {
-		t.Fatalf("expected thinking requirement error, got %v", err)
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %#v, want high", body["reasoning_effort"])
+	}
+}
+
+func TestGrok46SupportsXHigh(t *testing.T) {
+	body := captureBody(t, &litellm.Request{
+		Model:    "grok-4.6",
+		Messages: []litellm.Message{litellm.UserText("hi")},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled, Effort: "xhigh"},
+	})
+	if body["reasoning_effort"] != "xhigh" {
+		t.Fatalf("reasoning_effort = %#v, want xhigh", body["reasoning_effort"])
 	}
 }
 
@@ -96,6 +131,7 @@ func TestRejectsStopForReasoningModel(t *testing.T) {
 		Model:    "grok-4.3",
 		Messages: []litellm.Message{litellm.UserText("hi")},
 		Stop:     []string{"END"},
+		Thinking: &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 	})
 	if err == nil || !strings.Contains(err.Error(), "stop is not supported") {
 		t.Fatalf("expected stop error, got %v", err)
@@ -110,6 +146,7 @@ func TestRejectsUnsupportedReasoningProviderOptions(t *testing.T) {
 	_, err = p.Chat(context.Background(), &litellm.Request{
 		Model:           "grok-4.3",
 		Messages:        []litellm.Message{litellm.UserText("hi")},
+		Thinking:        &litellm.Thinking{Mode: litellm.ThinkingEnabled},
 		ProviderOptions: litellm.ProviderOptions{"presence_penalty": 0.2},
 	})
 	if err == nil || !strings.Contains(err.Error(), "presence_penalty") {
@@ -123,16 +160,28 @@ func TestCapabilities(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	caps := p.Capabilities("grok-4.3")
-	if caps.Thinking.Supported != litellm.SupportYes || !caps.Thinking.SupportsEffort("high") || caps.Thinking.SupportsEffort("max") {
+	if caps.Thinking.Supported != litellm.SupportPartial || caps.Thinking.Disable != litellm.SupportPartial || !caps.Thinking.SupportsEffort("high") || caps.Thinking.SupportsEffort("xhigh") {
 		t.Fatalf("thinking caps = %+v", caps.Thinking)
 	}
-	if alias := p.Capabilities("grok-latest"); alias.Thinking.Supported != litellm.SupportYes {
+	if alias := p.Capabilities("grok-latest"); alias.Thinking.Supported != litellm.SupportPartial {
 		t.Fatalf("alias thinking caps = %+v", alias.Thinking)
 	}
-	caps = p.Capabilities("grok-4")
-	if caps.Thinking.Supported != litellm.SupportNo || caps.Thinking.SupportsEffort("high") {
-		t.Fatalf("unsupported model caps = %+v", caps.Thinking)
+	if latest := p.Capabilities("grok-4.5-latest"); latest.Thinking.Supported != litellm.SupportPartial || latest.Tools.StrictSchema != litellm.SupportYes {
+		t.Fatalf("grok-4.5 caps = %+v", latest)
 	}
+	if future := p.Capabilities("grok-next"); future.Thinking.Supported != litellm.SupportPartial || !future.Thinking.SupportsEffort("high") {
+		t.Fatalf("future model caps = %+v", future.Thinking)
+	}
+}
+
+func mustTool(t *testing.T, name string, strict litellm.StrictMode) litellm.Tool {
+	t.Helper()
+	tool, err := litellm.NewTool(name, "Lookup.", map[string]any{"type": "object"})
+	if err != nil {
+		t.Fatalf("NewTool: %v", err)
+	}
+	tool.Strict = strict
+	return tool
 }
 
 func captureBody(t *testing.T, req *litellm.Request) map[string]any {

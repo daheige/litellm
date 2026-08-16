@@ -51,6 +51,7 @@ func New(cfg Config) (*compat.Provider, error) {
 			StrictTools: compat.StrictToolsForward,
 		},
 		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
+			caps.Tools.Choice = litellm.SupportPartial
 			if thinkingUnsupported(model) {
 				caps.Thinking.Supported = litellm.SupportNo
 				caps.Thinking.Disable = litellm.SupportNo
@@ -151,28 +152,27 @@ func effectiveThinkingEnabled(thinking *litellm.Thinking, model string) bool {
 }
 
 func thinkingDefaultEnabled(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni":
-		return true
-	default:
-		return false
-	}
+	return usesCurrentThinkingContract(model)
 }
 
 func thinkingOverridesSampling(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni":
-		return true
-	default:
-		return false
-	}
+	return usesCurrentThinkingContract(model)
 }
 
 func thinkingUnsupported(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "mimo-v2.5-tts", "mimo-v2.5-tts-voicedesign", "mimo-v2.5-tts-voiceclone", "mimo-v2-tts":
-		return true
-	default:
+	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "-tts")
+}
+
+func usesCurrentThinkingContract(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if thinkingUnsupported(model) || !strings.HasPrefix(model, "mimo-v") {
 		return false
 	}
+	version := strings.TrimPrefix(model, "mimo-v")
+	version, _, _ = strings.Cut(version, "-")
+	var major, minor int
+	if _, err := fmt.Sscanf(version, "%d.%d", &major, &minor); err != nil {
+		return false
+	}
+	return major > 2 || major == 2 && minor >= 5
 }

@@ -58,3 +58,21 @@ func TestCapabilitiesMapperCanOverrideDefaults(t *testing.T) {
 		t.Fatalf("caps = %+v", caps)
 	}
 }
+
+func TestStrictToolCapabilities(t *testing.T) {
+	for _, test := range []struct {
+		mode StrictToolMode
+		want litellm.Support
+	}{
+		{mode: StrictToolsRequireAll, want: litellm.SupportPartial},
+		{mode: StrictToolsAlways, want: litellm.SupportYes},
+	} {
+		provider, err := New(Config{BaseURL: "https://compat.test"}, Spec{Name: "compat-test", Features: FeatureSpec{StrictTools: test.mode}})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if got := provider.Capabilities("model").Tools.StrictSchema; got != test.want {
+			t.Fatalf("mode %d strict support = %v, want %v", test.mode, got, test.want)
+		}
+	}
+}

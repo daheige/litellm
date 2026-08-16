@@ -15,7 +15,7 @@ func cleanStrictSchema(schema any) any {
 	case map[string]any:
 		out := make(map[string]any, len(s))
 		for key, value := range s {
-			if key == "examples" || key == "default" || key == "const" {
+			if key == "examples" || key == "default" {
 				continue
 			}
 			out[key] = cleanStrictSchema(value)
@@ -40,6 +40,9 @@ func cleanStrictSchema(schema any) any {
 func validateStrictSchema(schema any, path string) error {
 	switch s := schema.(type) {
 	case map[string]any:
+		if _, ok := s["const"]; ok {
+			return fmt.Errorf("%s.const is not supported with strict=true; use enum with one value", path)
+		}
 		if schemaTypeIncludesObject(s["type"]) {
 			if v, ok := s["additionalProperties"]; !ok || v != false {
 				return fmt.Errorf("%s: object schemas used with strict=true require additionalProperties:false", path)

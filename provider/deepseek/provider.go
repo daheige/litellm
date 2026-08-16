@@ -13,15 +13,19 @@ const defaultBaseURL = "https://api.deepseek.com"
 type Config = compat.Config
 
 const (
-	ProviderOptionLogprobs    = "logprobs"
-	ProviderOptionTopLogprobs = "top_logprobs"
-	ProviderOptionUserID      = "user_id"
+	ProviderOptionLogprobs         = "logprobs"
+	ProviderOptionTopLogprobs      = "top_logprobs"
+	ProviderOptionUserID           = "user_id"
+	ProviderOptionFrequencyPenalty = "frequency_penalty"
+	ProviderOptionPresencePenalty  = "presence_penalty"
 )
 
 var allowedProviderOptions = map[string]struct{}{
-	ProviderOptionLogprobs:    {},
-	ProviderOptionTopLogprobs: {},
-	ProviderOptionUserID:      {},
+	ProviderOptionLogprobs:         {},
+	ProviderOptionTopLogprobs:      {},
+	ProviderOptionUserID:           {},
+	ProviderOptionFrequencyPenalty: {},
+	ProviderOptionPresencePenalty:  {},
 }
 
 func New(cfg Config) (*compat.Provider, error) {
@@ -39,6 +43,7 @@ func New(cfg Config) (*compat.Provider, error) {
 		Request: compat.RequestSpec{
 			Thinking:                               mapThinking,
 			Warnings:                               thinkingWarnings,
+			ProviderOptions:                        mapProviderOptions,
 			AllowedProviderOptions:                 allowedProviderOptions,
 			EmitEmptyAssistantContentWithToolCalls: true,
 		},
@@ -55,10 +60,10 @@ func New(cfg Config) (*compat.Provider, error) {
 			StrictTools: strictTools,
 		},
 		Capabilities: func(_ string, caps litellm.Capabilities) litellm.Capabilities {
-			caps.Thinking.Efforts = litellm.PortableThinkingEfforts()
+			caps.Thinking.Efforts = []string{"low", "medium", "high", "xhigh", "max"}
 			caps.Thinking.BudgetTokens = litellm.SupportNo
 			caps.Thinking.IncludeOutput = litellm.SupportNo
-			caps.Thinking.Notes = []string{"minimal, low, medium, and high map to high; xhigh and max map to max"}
+			caps.Thinking.Notes = []string{"reasoning_effort maps low/medium→high and xhigh→max"}
 			return caps
 		},
 	})
@@ -101,12 +106,12 @@ func thinkingEffort(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "":
 		return "", nil
-	case "minimal", "low", "medium", "high":
+	case "low", "medium", "high":
 		return "high", nil
 	case "xhigh", "max":
 		return "max", nil
 	default:
-		return "", fmt.Errorf("deepseek: unsupported thinking effort %q; use high or max", value)
+		return "", fmt.Errorf("deepseek: unsupported thinking effort %q; use low, medium, high, xhigh, or max", value)
 	}
 }
 
@@ -115,12 +120,32 @@ func thinkingWarnings(req *litellm.Request) []litellm.Warning {
 		return nil
 	}
 	value := strings.ToLower(strings.TrimSpace(thinkingValue(req.Thinking)))
-	if value != "minimal" && value != "low" && value != "medium" {
+	if value != "low" && value != "medium" && value != "xhigh" {
 		return nil
 	}
+	mapped, _ := thinkingEffort(value)
 	return []litellm.Warning{{
 		Code:     "deepseek.thinking_effort_folded",
 		Provider: "deepseek",
-		Message:  fmt.Sprintf("DeepSeek only supports reasoning_effort high or max; mapped %q to high", value),
+		Message:  fmt.Sprintf("DeepSeek maps reasoning_effort %q to %s", value, mapped),
 	}}
+}
+
+func mapProviderOptions(options litellm.ProviderOptions, body map[string]any, req *litellm.Request) error {
+	thinkingEnabled := req.Thinking == nil || req.Thinking.Mode != litellm.ThinkingDisabled
+	if thinkingEnabled {
+		if req.Temperature != nil || req.TopP != nil {
+			return fmt.Errorf("deepseek: temperature and top_p have no effect in thinking mode")
+		}
+		if _, ok := options[ProviderOptionFrequencyPenalty]; ok {
+			return fmt.Errorf("deepseek: frequency_penalty has no effect in thinking mode")
+		}
+		if _, ok := options[ProviderOptionPresencePenalty]; ok {
+			return fmt.Errorf("deepseek: presence_penalty has no effect in thinking mode")
+		}
+	}
+	for key, value := range options {
+		body[key] = value
+	}
+	return nil
 }
